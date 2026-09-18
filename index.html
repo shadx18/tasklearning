@@ -6,6 +6,7 @@
 <title>TaskLearning — Gestor de asignaturas</title>
 <link rel="stylesheet" href="css/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
 <div class="layout">
@@ -77,6 +78,36 @@
     <!-- ===== VISTA: PANEL ===== -->
     <section id="view-panel" class="view active">
       <div class="stats-grid" id="stats-grid"></div>
+
+      <!-- ANALIZADOR DE PDF -->
+      <div class="card analyzer-card" id="analyzer-section">
+        <h3>
+          <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Analizador de asignatura
+        </h3>
+        <p class="muted" style="margin-bottom:14px">Sube el plan temático o apuntes de la asignatura. La plataforma genera un plan detallado, repasos y recomienda la mejor IA.</p>
+        <div class="analyzer-form">
+          <label class="field">Nombre de la asignatura <span class="req">*</span>
+            <input type="text" id="analyzer-name" placeholder="Ej: Matemática Discreta">
+          </label>
+          <div class="dropzone" id="dropzone">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="36" height="36"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>Arrastra tus PDFs aquí o <span class="dropzone-link">selecciona archivos</span></p>
+            <small>Soporta uno o varios PDFs a la vez</small>
+            <input type="file" id="analyzer-files" accept="application/pdf" multiple hidden>
+          </div>
+          <div class="file-list" id="analyzer-file-list"></div>
+          <button class="btn btn-primary" id="btn-analyze" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Analizar asignatura
+          </button>
+        </div>
+        <div class="analyzer-progress" id="analyzer-progress" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+          <p class="muted" id="progress-text">Extrayendo texto del PDF...</p>
+        </div>
+      </div>
+
       <div class="panel-columns">
         <div class="card">
           <h3>

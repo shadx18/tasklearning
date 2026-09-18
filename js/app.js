@@ -59,6 +59,7 @@ async function init() {
   userSubjects = loadLocal();
   renderAll();
   bindEvents();
+  initAnalyzer();
   // Deep-link: index.html#asignaturas / #backup abre esa vista directamente
   const h = location.hash.replace("#", "");
   if (["panel", "asignaturas", "backup"].includes(h)) switchView(h);
@@ -207,7 +208,7 @@ function openDetail(id) {
   if (!s) return;
   const isAnalyzed = !!s.ia;
   const isSeed = seedSubjects.some(x => x.id === s.id);
-  const instruccion = `Analiza la asignatura "${s.nombre}" (2do año, carrera Ingeniería Informática, CUJAE — contexto universidades cubanas). Breve descripción: "${s.descripcion || "sin descripción"}". Investiga su plan temático típico. Si encuentras un plan viable, entrégame: 1) resumen general de la asignatura, 2) plan temático con sus temas, 3) un repaso tipo PDF para CADA tema, 4) qué IA me conviene para consultar dudas de esta asignatura (Kimi Moderato / ChatGPT Free / Claude Free) y por qué, 5) tareas que pueda delegar en mi Ollama local. Si NO encuentras un plan viable o no estás seguro, dímelo claramente y te subo el PDF oficial del plan temático para que analices el documento directamente.`;
+  const instruccion = `Analiza la asignatura "${s.nombre}" (2do año, carrera Ingeniería Informática, CUJAE — contexto universidades cubanas). Breve descripción: "${s.descripcion || "sin descripción"}". Investiga su plan temático típico. Si encuentras un plan viable, entrégame: 1) resumen general de la asignatura, 2) plan temático con sus temas, 3) un repaso tipo PDF para CADA tema, 4) qué IA me conviene para consultar dudas de esta asignatura (Kimi Moderato / ChatGPT Free / Claude Free) y por qué. Si NO encuentras un plan viable o no estás seguro, dímelo claramente y te subo el PDF oficial del plan temático para que analices el documento directamente.`;
 
   byId("detail-content").innerHTML = `
     <div class="modal-head">
@@ -396,7 +397,7 @@ function bindEvents() {
       newId = "u_" + Date.now();
       userSubjects.push({
         id: newId, ...data,
-        resumen: "", temas: [], repasos: [], ia: null, iaRazon: "", ollamaTasks: [],
+        resumen: "", temas: [], repasos: [], ia: null, iaRazon: "",
         pendienteAnalisis: true,
       });
     }
@@ -448,6 +449,263 @@ function switchView(v) {
   };
   byId("view-title").textContent = titles[v][0];
   byId("view-subtitle").textContent = titles[v][1];
+}
+
+/* =========================================================
+   ANALIZADOR DE ASIGNATURAS
+   Extrae texto de PDFs, genera plan temático, repasos y
+   recomienda la mejor IA.
+   ========================================================= */
+
+let analyzerFiles = [];
+
+function initAnalyzer() {
+  const dz = byId("dropzone");
+  const fi = byId("analyzer-files");
+  const fl = byId("analyzer-file-list");
+  const btn = byId("btn-analyze");
+
+  dz.addEventListener("click", () => fi.click());
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("dragover"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+  dz.addEventListener("drop", e => {
+    e.preventDefault(); dz.classList.remove("dragover");
+    addAnalyzerFiles(Array.from(e.dataTransfer.files).filter(f => f.type === "application/pdf"));
+  });
+  fi.addEventListener("change", () => { addAnalyzerFiles(Array.from(fi.files)); fi.value = ""; });
+  btn.addEventListener("click", runAnalysis);
+}
+
+function addAnalyzerFiles(files) {
+  files.forEach(f => {
+    if (!analyzerFiles.some(x => x.name === f.name)) analyzerFiles.push(f);
+  });
+  renderAnalyzerFileList();
+}
+
+function renderAnalyzerFileList() {
+  const fl = byId("analyzer-file-list");
+  const btn = byId("btn-analyze");
+  fl.innerHTML = analyzerFiles.map((f, i) =>
+    `<span class="file-tag">${esc(f.name)} <button class="file-remove" data-idx="${i}" aria-label="Quitar">&times;</button></span>`
+  ).join("");
+  fl.querySelectorAll(".file-remove").forEach(b =>
+    b.addEventListener("click", () => { analyzerFiles.splice(+b.dataset.idx, 1); renderAnalyzerFileList(); })
+  );
+  btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
+  byId("analyzer-name").addEventListener("input", () => {
+    btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
+  });
+}
+
+async function extractPdfText(file) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(" ") + "\n";
+  }
+  return text;
+}
+
+function setProgress(pct, msg) {
+  byId("analyzer-progress").hidden = false;
+  byId("progress-fill").style.width = pct + "%";
+  byId("progress-text").textContent = msg;
+}
+
+function analyzeText(fullText) {
+  const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 3);
+  const lower = fullText.toLowerCase();
+
+  // Detectar tipo de materia
+  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","gráfico","nodo","arista"];
+  const progKw = ["código","programa","algoritmo","clase","método","función","objeto","array","lista","puntero","memoria","compilador","int","string","void","return","for","while","if","clase","herencia","interface","tipo","dato"];
+  const theoryKw = ["definición","propiedad","axioma","ley","principio","teoría","concepto","paradigma","enfoque","modelo","análisis","síntesis","comparación","crítica"];
+  const redaccionKw = ["ensayo","párrafo","redacción",".argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión"];
+
+  const score = (kws) => kws.reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0);
+  const scores = { math: score(mathKw), prog: score(progKw), theory: score(theoryKw), redaccion: score(redaccionKw) };
+  const maxScore = Math.max(1, ...Object.values(scores));
+
+  // Detectar temas: buscar líneas que parezcan títulos o numerados
+  const topicPatterns = [
+    /^[\dIVX]+[\.\)\-:]\s+(.+)/,
+    /^tema\s*\d+[\.\:\-]?\s*(.+)/i,
+    /^cap[ií]tulo\s*\d+[\.\:\-]?\s*(.+)/i,
+    /^unidad\s*\d+[\.\:\-]?\s*(.+)/i,
+    /^m[oó]dulo\s*\d+[\.\:\-]?\s*(.+)/i,
+    /^[\d]+[\.\)]\s+[A-ZÁÉÍÓÚÜ].{10,}/,
+  ];
+
+  let topics = [];
+  lines.forEach(line => {
+    for (const pat of topicPatterns) {
+      const m = line.match(pat);
+      if (m) { topics.push(m[1] ? m[1].trim() : line.trim()); break; }
+    }
+  });
+
+  // Si no se detectaron temas, extraer de oraciones clave
+  if (topics.length < 3) {
+    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 200);
+    const keywords = ["tema","capítulo","unidad","módulo","sección","parte","apunte","práctica","ejercicio","parcial","final","taller","laboratorio"];
+    sentences.forEach(s => {
+      const sl = s.toLowerCase();
+      if (keywords.some(k => sl.includes(k)) && topics.length < 15) {
+        topics.push(s.split(":").pop().trim().substring(0, 80));
+      }
+    });
+  }
+
+  // Fallback: tomar primeras oraciones sustanciosas
+  if (topics.length < 3) {
+    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 15 && s.length < 150);
+    topics = sentences.slice(0, Math.min(10, sentences.length));
+  }
+
+  // Limpiar y deduplicar
+  topics = [...new Set(topics.map(t => t.replace(/\s+/g, " ").trim()))].slice(0, 20);
+
+  // Generar repasos por tema
+  const repasos = topics.map(t => ({
+    tema: t,
+    contenido: generateReview(t, fullText),
+  }));
+
+  // Resumen general
+  const wordCount = fullText.split(/\s+/).length;
+  const firstParagraphs = lines.filter(l => l.length > 30).slice(0, 5).join(". ");
+  const resumen = firstParagraphs.substring(0, 400) + (firstParagraphs.length > 400 ? "..." : "");
+
+  // Recomendar IA
+  let ia = "chatgpt";
+  let iaRazon = "";
+  if (scores.math / maxScore > 0.4) {
+    ia = "chatgpt";
+    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso, ecuaciones y demostraciones de forma clara.";
+  } else if (scores.prog / maxScore > 0.4) {
+    ia = "kimi";
+    iaRazon = "Contiene temas de programación. Kimi genera proyectos de código, analiza algoritmos y explica estructuras de datos con ejemplos.";
+  } else if (scores.redaccion / maxScore > 0.3) {
+    ia = "claude";
+    iaRazon = "Contiene temas de redacción/comprensión. Claude redige ensayos, revisa estilo académico y estructura argumentativa.";
+  } else {
+    ia = "kimi";
+    iaRazon = "Tema mixto o no clasificado. Kimi trabaja bien con documentos largos y planes de estudio generales.";
+  }
+
+  return { resumen, topics, repasos, ia, iaRazon, wordCount };
+}
+
+function generateReview(topic, fullText) {
+  const lower = fullText.toLowerCase();
+  const topicLower = topic.toLowerCase();
+
+  // Buscar contexto alrededor del tema
+  const idx = lower.indexOf(topicLower.substring(0, 20));
+  let context = "";
+  if (idx !== -1) {
+    const start = Math.max(0, idx - 100);
+    const end = Math.min(fullText.length, idx + 500);
+    context = fullText.substring(start, end);
+  }
+
+  const lines = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15);
+  const keyPoints = lines.slice(0, 5).map(l => l.trim());
+
+  if (keyPoints.length === 0) {
+    keyPoints.push(
+      `Definición y conceptos fundamentales de ${topic}.`,
+      `Aplicación práctica y ejemplos representativos.`,
+      `Relación con otros temas del plan de estudios.`,
+      `Preguntas frecuentes de examen sobre este tema.`
+    );
+  }
+
+  let review = `**Repaso: ${topic}**\n\n`;
+  review += keyPoints.map((p, i) => `${i + 1}. ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
+  review += `\n\n**Puntos clave para el examen:**\n`;
+  review += `- Domina la definición y diferencia con conceptos similares.\n`;
+  review += `- Practica al menos 3 ejercicios de cada tipo.\n`;
+  review += `- Revisa ejercicios de parciales anteriores relacionados.`;
+  return review;
+}
+
+async function runAnalysis() {
+  const name = byId("analyzer-name").value.trim();
+  if (!name || !analyzerFiles.length) return;
+
+  const btn = byId("btn-analyze");
+  btn.disabled = true;
+  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Analizando...`;
+
+  try {
+    let fullText = "";
+    for (let i = 0; i < analyzerFiles.length; i++) {
+      setProgress((i / analyzerFiles.length) * 60, `Leyendo PDF ${i + 1} de ${analyzerFiles.length}: ${analyzerFiles[i].name}`);
+      const text = await extractPdfText(analyzerFiles[i]);
+      fullText += text + "\n\n";
+    }
+
+    if (!fullText.trim()) {
+      toast("No se pudo extraer texto de los PDFs. Pueden ser imágenes escaneadas.", "error");
+      return;
+    }
+
+    setProgress(70, "Analizando contenido y detectando temas...");
+    await new Promise(r => setTimeout(r, 400));
+
+    const result = analyzeText(fullText);
+
+    setProgress(85, "Generando plan temático y repasos...");
+    await new Promise(r => setTimeout(r, 300));
+
+    // Crear o actualizar la asignatura en userSubjects
+    let subject = userSubjects.find(s => s.nombre.toLowerCase() === name.toLowerCase());
+    if (!subject) {
+      subject = {
+        id: "u_" + Date.now(),
+        nombre: name,
+        descripcion: `Análisis automático de ${analyzerFiles.length} PDF(s)`,
+        anno: "2", semestre: "",
+      };
+      userSubjects.push(subject);
+    }
+
+    subject.resumen = result.resumen;
+    subject.temas = result.topics;
+    subject.repasos = result.repasos;
+    subject.ia = result.ia;
+    subject.iaRazon = result.iaRazon;
+    subject.pendienteAnalisis = false;
+
+    setProgress(95, "Guardando resultados...");
+    await new Promise(r => setTimeout(r, 200));
+
+    saveLocal();
+    renderAll();
+
+    setProgress(100, "Análisis completado.");
+    analyzerFiles = [];
+    renderAnalyzerFileList();
+    byId("analyzer-name").value = "";
+
+    toast(`"${name}" analizada: ${result.topics.length} temas, ${result.repasos.length} repasos generados`);
+    setTimeout(() => { byId("analyzer-progress").hidden = true; }, 2000);
+
+    openDetail(subject.id);
+  } catch (err) {
+    toast("Error al analizar: " + err.message, "error");
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Analizar asignatura`;
+    btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
+  }
 }
 
 init();
