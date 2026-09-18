@@ -75,7 +75,7 @@ async function init() {
   initAnalyzer();
   renderSidebarSubjects();
   const h = location.hash.replace("#", "");
-  if (["panel", "asignaturas", "backup"].includes(h)) switchView(h);
+  if (["panel", "asignaturas"].includes(h)) switchView(h);
 }
 
 function loadLocal() {
@@ -985,31 +985,6 @@ function bindEvents() {
     saveLocal(); renderAll(); closeModals();
   });
 
-  byId("btn-export").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify({ userSubjects, testScores }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "tasklearning-respaldo.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast("Respaldo descargado");
-  });
-  byId("import-file").addEventListener("change", e => {
-    const f = e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try {
-        const j = JSON.parse(r.result);
-        if (!Array.isArray(j.userSubjects)) throw new Error("formato");
-        userSubjects = j.userSubjects;
-        if (j.testScores) testScores = j.testScores;
-        saveLocal(); saveScores(); renderAll();
-        toast("Datos importados");
-      } catch { toast("Archivo inválido", "error"); }
-    };
-    r.readAsText(f);
-  });
 }
 
 function switchView(v) {
@@ -1019,7 +994,6 @@ function switchView(v) {
   const titles = {
     panel: ["Panel", "Resumen de tu semestre"],
     asignaturas: ["Asignaturas", `${allSubjects().length} registradas · toca una tarjeta para ver el detalle`],
-    backup: ["Respaldo", "Exporta o importa tus datos"],
   };
   byId("view-title").textContent = titles[v][0];
   byId("view-subtitle").textContent = titles[v][1];
