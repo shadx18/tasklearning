@@ -467,15 +467,24 @@ function initAnalyzer() {
   const dz = byId("dropzone");
   const fi = byId("analyzer-files");
   const btn = byId("btn-analyze");
+  const nameInput = byId("analyzer-name");
+
+  /* Activar/desactivar botón según haya archivos Y nombre */
+  const updateBtnState = () => {
+    btn.disabled = !analyzerFiles.length || !nameInput.value.trim();
+  };
 
   dz.addEventListener("click", () => fi.click());
   dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("dragover"); });
   dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
   dz.addEventListener("drop", e => {
     e.preventDefault(); dz.classList.remove("dragover");
-    addAnalyzerFiles(Array.from(e.dataTransfer.files).filter(f => f.type === "application/pdf"));
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type === "application/pdf");
+    if (files.length === 0) { toast("Solo se aceptan archivos PDF", "error"); return; }
+    addAnalyzerFiles(files);
   });
   fi.addEventListener("change", () => { addAnalyzerFiles(Array.from(fi.files)); fi.value = ""; });
+  nameInput.addEventListener("input", updateBtnState);
   btn.addEventListener("click", runAnalysis);
 }
 
@@ -499,14 +508,42 @@ function renderAnalyzerFileList() {
 }
 
 async function extractPdfText(file) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  /* Configurar worker solo una vez */
+  if (!window._pdfWorkerReady) {
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      window._pdfWorkerReady = true;
+    } catch (e) {
+      /* Si falla el CDN, intentar sin worker (más lento pero funciona) */
+      console.warn("PDF.js worker no disponible, usando modo sin worker");
+    }
+  }
+
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const loadingTask = pdfjsLib.getDocument({ data: buf });
+  const pdf = await loadingTask.promise;
   let text = "";
+
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    text += content.items.map(it => it.str).join(" ") + "\n";
+
+    /* Agrupar items por línea (misma Y position) para evitar palabras pegadas */
+    const items = content.items;
+    let lastY = null;
+    let lineText = "";
+
+    for (const item of items) {
+      const y = Math.round(item.transform[5]);
+      if (lastY !== null && Math.abs(y - lastY) > 5) {
+        /* Nueva línea */
+        text += lineText.trim() + "\n";
+        lineText = "";
+      }
+      lineText += (lineText && !lineText.endsWith(" ") ? " " : "") + item.str;
+      lastY = y;
+    }
+    if (lineText.trim()) text += lineText.trim() + "\n";
   }
   return text;
 }
@@ -865,33 +902,50 @@ function generateExercise(topic, fullText, scores) {
    ========================================================= */
 async function runAnalysis() {
   const name = byId("analyzer-name").value.trim();
-  if (!name || !analyzerFiles.length) return;
+  if (!name) { toast("Escribe el nombre de la asignatura", "error"); return; }
+  if (!analyzerFiles.length) { toast("Selecciona al menos un PDF", "error"); return; }
 
   const btn = byId("btn-analyze");
   btn.disabled = true;
+  const originalBtnHtml = btn.innerHTML;
   btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Analizando...`;
 
   try {
+    /* Paso 1: Extraer texto de los PDFs */
     let fullText = "";
     for (let i = 0; i < analyzerFiles.length; i++) {
-      setProgress((i / analyzerFiles.length) * 60, `Leyendo PDF ${i + 1}/${analyzerFiles.length}: ${analyzerFiles[i].name}`);
-      const text = await extractPdfText(analyzerFiles[i]);
-      fullText += text + "\n\n";
+      setProgress(((i + 1) / analyzerFiles.length) * 55, `Leyendo PDF ${i + 1}/${analyzerFiles.length}: ${analyzerFiles[i].name}`);
+      try {
+        const text = await extractPdfText(analyzerFiles[i]);
+        fullText += text + "\n\n";
+      } catch (pdfErr) {
+        console.error(`Error leyendo ${analyzerFiles[i].name}:`, pdfErr);
+        toast(`Error leyendo "${analyzerFiles[i].name}": ${pdfErr.message}`, "error");
+      }
     }
 
     if (!fullText.trim()) {
-      toast("No se pudo extraer texto. Pueden ser imágenes escaneadas.", "error");
+      toast("No se pudo extraer texto de los PDFs. Pueden ser imágenes escaneadas.", "error");
       return;
     }
 
-    setProgress(70, "Analizando contenido...");
-    await new Promise(r => setTimeout(r, 300));
+    setProgress(60, "Analizando contenido...");
+    await new Promise(r => setTimeout(r, 200));
 
-    const result = analyzeText(fullText, name);
+    /* Paso 2: Analizar texto */
+    let result;
+    try {
+      result = analyzeText(fullText, name);
+    } catch (analyzeErr) {
+      console.error("Error en análisis:", analyzeErr);
+      toast("Error al analizar el contenido: " + analyzeErr.message, "error");
+      return;
+    }
 
-    setProgress(85, "Generando tests y ejercicios...");
-    await new Promise(r => setTimeout(r, 300));
+    setProgress(80, "Generando tests y ejercicios...");
+    await new Promise(r => setTimeout(r, 200));
 
+    /* Paso 3: Guardar asignatura */
     let subject = userSubjects.find(s => s.nombre.toLowerCase() === name.toLowerCase());
     if (!subject) {
       subject = { id: "u_" + Date.now(), nombre: name, descripcion: `Análisis de ${analyzerFiles.length} PDF(s)`, anno: "2", semestre: "" };
@@ -899,30 +953,42 @@ async function runAnalysis() {
     }
 
     Object.assign(subject, {
-      resumen: result.resumen, temas: result.topics, repasos: result.repasos,
-      tests: result.tests, ejercicios: result.ejercicios, resumenes: result.resumenes,
-      ia: result.ia, iaRazon: result.iaRazon, pendienteAnalisis: false,
+      resumen: result.resumen,
+      temas: result.topics,
+      repasos: result.repasos,
+      tests: result.tests,
+      ejercicios: result.ejercicios,
+      resumenes: result.resumenes,
+      ia: result.ia,
+      iaRazon: result.iaRazon,
+      pendienteAnalisis: false,
     });
 
-    setProgress(95, "Guardando...");
-    await new Promise(r => setTimeout(r, 200));
+    setProgress(92, "Guardando...");
+    await new Promise(r => setTimeout(r, 150));
 
-    saveLocal(); renderAll();
+    saveLocal();
+    renderAll();
+
     setProgress(100, "Completado.");
     analyzerFiles = [];
     renderAnalyzerFileList();
     byId("analyzer-name").value = "";
 
-    toast(`"${name}": ${result.topics.length} temas, ${result.tests.length} tests, ${result.ejercicios.length} ejercicios`);
-    setTimeout(() => { byId("analyzer-progress").hidden = true; }, 2000);
+    const nTopics = result.topics.length;
+    const nTests = result.tests.length;
+    const nExercises = result.ejercicios.length;
+    toast(`"${name}": ${nTopics} temas, ${nTests} tests, ${nExercises} ejercicios — IA: ${iaLabel(result.ia)}`);
+    setTimeout(() => { byId("analyzer-progress").hidden = true; }, 1500);
 
+    /* Abrir detalle de la asignatura */
     openDetail(subject.id);
   } catch (err) {
-    toast("Error: " + err.message, "error");
+    toast("Error inesperado: " + err.message, "error");
     console.error(err);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Analizar asignatura`;
+    btn.innerHTML = originalBtnHtml;
     btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
   }
 }
