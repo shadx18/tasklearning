@@ -17,7 +17,6 @@
   --kimi: #5b8cff;
   --chatgpt: #10a37f;
   --claude: #d97757;
-  --ollama: #a78bfa;
   --warn: #e3b341;
   --danger: #f47067;
   --radius: 12px;
@@ -107,7 +106,6 @@ svg:not([width]) { width: 16px; height: 16px; }
 .dot.kimi { background: var(--kimi); box-shadow: 0 0 8px rgba(91,140,255,.6); }
 .dot.chatgpt { background: var(--chatgpt); box-shadow: 0 0 8px rgba(16,163,127,.5); }
 .dot.claude { background: var(--claude); box-shadow: 0 0 8px rgba(217,119,87,.5); }
-.dot.ollama { background: var(--ollama); box-shadow: 0 0 8px rgba(167,139,250,.5); }
 
 /* ---------- Main ---------- */
 .main { flex: 1; padding: 30px 36px; max-width: 1180px; min-width: 0; }
@@ -219,12 +217,7 @@ svg:not([width]) { width: 16px; height: 16px; }
 }
 .ai-subject:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
-.tips { list-style: none; }
-.tips li { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--muted); }
-.tips li:last-child { border-bottom: none; }
-.tips li svg { color: var(--ollama); margin-top: 1px; }
-
-/* ---------- Toolbar (buscar + filtros) ---------- */
+.backup-actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
 .search-box {
   display: flex; align-items: center; gap: 9px;
@@ -291,7 +284,7 @@ svg:not([width]) { width: 16px; height: 16px; }
 .ai-badge.kimi { background: rgba(91, 140, 255, .14); color: var(--kimi); }
 .ai-badge.chatgpt { background: rgba(16, 163, 127, .14); color: #34d399; }
 .ai-badge.claude { background: rgba(217, 119, 87, .14); color: var(--claude); }
-.ai-badge.ollama { background: rgba(167, 139, 250, .14); color: var(--ollama); }
+.ai-badge.pending-badge { background: rgba(227, 179, 65, .14); color: var(--warn); }
 
 .empty-state {
   grid-column: 1 / -1; text-align: center; padding: 64px 24px;
@@ -377,13 +370,6 @@ svg:not([width]) { width: 16px; height: 16px; }
 }
 .pdf-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pdf-name svg { color: var(--accent); }
-
-.ollama-tasks { display: flex; flex-direction: column; gap: 8px; }
-.ollama-task {
-  display: flex; justify-content: space-between; align-items: center;
-  background: rgba(167, 139, 250, .06); border: 1px solid rgba(167, 139, 250, .2);
-  border-radius: var(--radius-sm); padding: 10px 14px; font-size: 13px;
-}
 
 .backup-actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 

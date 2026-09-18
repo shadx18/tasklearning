@@ -36,7 +36,7 @@ const I = {
 /* ---------------- Utilidades ---------------- */
 function byId(id) { return document.getElementById(id); }
 function esc(t) { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; }
-function iaLabel(k) { return { kimi: "Kimi", chatgpt: "ChatGPT", claude: "Claude", ollama: "Ollama" }[k] || k; }
+function iaLabel(k) { return { kimi: "Kimi", chatgpt: "ChatGPT", claude: "Claude" }[k] || k; }
 function allSubjects() { return [...seedSubjects, ...userSubjects]; }
 
 /* ---------------- Notificaciones toast ---------------- */
@@ -75,7 +75,6 @@ function renderAll() {
   renderStats();
   renderDistribution();
   renderSubjects();
-  renderOllamaTips();
 }
 
 /* ---------------- Panel ---------------- */
@@ -123,17 +122,6 @@ function renderDistribution() {
   });
 }
 
-function renderOllamaTips() {
-  const tips = [
-    "Cuestionarios de práctica a partir de tus apuntes",
-    "Resúmenes de capítulos o clases antes del examen",
-    "Tarjetas de memoria (pregunta/respuesta) de cualquier tema",
-    "Glosarios de términos técnicos en español",
-    "Datos de ejemplo para prácticas de programación",
-  ];
-  byId("ollama-tips").innerHTML = tips.map(t => `<li>${I.zap}<span>${esc(t)}</span></li>`).join("");
-}
-
 /* ---------------- Tarjetas ---------------- */
 function renderSubjects() {
   const grid = byId("subjects-grid");
@@ -178,9 +166,9 @@ function renderSubjects() {
         ${(s.repasos?.length) ? `<span>${I.file}${s.repasos.length} repaso${s.repasos.length !== 1 ? "s" : ""} PDF</span>` : ""}
       </div>
       <div class="subject-foot">
-        ${isAnalyzed
+          ${isAnalyzed
           ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>`
-          : `<span class="ai-badge ollama">Sin analizar</span>`}
+          : `<span class="ai-badge pending-badge">Sin analizar</span>`}
         <div class="subject-actions">
           ${isSeed ? "" : `
           <button class="icon-btn" data-edit="${s.id}" title="Editar" aria-label="Editar">${I.pencil}</button>
@@ -226,7 +214,7 @@ function openDetail(id) {
       <div>
         <h3>${esc(s.nombre)}</h3>
         <div class="detail-badges">
-          ${isAnalyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge ollama">Sin analizar</span>`}
+          ${isAnalyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge pending-badge">Sin analizar</span>`}
           <span class="status-tag ${isAnalyzed ? "ok" : "pending"}">${isAnalyzed ? "Analizada" : "Pendiente"}</span>
         </div>
       </div>
@@ -267,14 +255,6 @@ function openDetail(id) {
     <div class="detail-section">
       <h4>IA sugerida para dudas</h4>
       <div class="ia-reason">${isAnalyzed ? esc(s.iaRazon) : "Pendiente — aparecerá aquí cuando Kimi analice la asignatura."}</div>
-    </div>
-
-    <div class="detail-section">
-      <h4>Delegable en Ollama (gratis, local)</h4>
-      <div class="ollama-tasks">
-        ${(s.ollamaTasks?.length ? s.ollamaTasks : ["Cuestionarios de práctica", "Resumen de apuntes", "Tarjetas de memoria"]).map(t =>
-          `<div class="ollama-task"><span>${esc(t)}</span><span class="ai-badge ollama">local</span></div>`).join("")}
-      </div>
     </div>
 
     ${isSeed ? "" : `<div class="detail-section detail-admin">
