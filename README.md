@@ -1,34 +1,51 @@
-# TaskLearning 🎓
+# TaskLearning
 
-Gestor personal de asignaturas universitarias (CUJAE · Ing. Informática) que combina:
+Gestor personal de asignaturas universitarias para CUJAE (Ing. Informatica).
 
-- 📚 **Planes de estudio** por asignatura (borradores basados en el currículo cubano, verificables con PDF oficial)
-- 🤖 **IA recomendada por asignatura** según el tipo de tarea (Kimi Moderato / ChatGPT Free / Claude Free)
-- ⚡ **Tareas delegables a Ollama local** (gratis y privadas: cuestionarios, resúmenes, tarjetas de memoria)
-- 📎 **Subida de PDFs** del plan temático (guardados localmente en tu navegador)
-- 💾 **Respaldo/exportación** de tus datos en JSON
+Subes el PDF del plan tematico y la plataforma genera automaticamente:
+
+- Plan tematico detallado por temas
+- Repasos enfocados en examen
+- Tests interactivos con verificacion y explicaciones
+- Ejercicios con soluciones paso a paso
+- Resumenes inteligentes por tema
+- Recomendacion de IA segun la materia (Kimi / ChatGPT / Claude)
 
 ## Uso
 
-Web pública: https://shadx18.github.io/tasklearning/
+**Web:** https://shadx18.github.io/tasklearning/
 
-Local: ejecuta `serve.ps1` y abre http://localhost:8080
+**Local:**
+```bash
+python -m http.server 8080
+# Abre http://localhost:8080
+```
 
-## Flujo de análisis con Kimi
+## Flujo
 
-1. Agrega la asignatura en la app
-2. Copia la instrucción generada y pégala en Kimi Work
-3. Kimi analiza el plan (o el PDF que subas) y actualiza `data/subjects.json`
-4. La web pública se actualiza con el análisis
+1. En el Panel, escribe el nombre de la asignatura
+2. Arrastra o selecciona el PDF del plan tematico
+3. La plataforma extrae el texto y genera todo el materia
+4. En Asignaturas, toca la tarjeta para ver el detalle con tabs
+5. En Respaldo, exporta un JSON para no perder tus datos
 
 ## Estructura
 
 ```
-index.html      — interfaz
-css/style.css   — tema profesional oscuro
-js/app.js       — lógica (localStorage + IndexedDB)
-data/subjects.json — asignaturas analizadas (mantenida por Kimi)
+index.html          Interfaz principal
+css/style.css       Tema oscuro profesional
+js/app.js           Logica completa (analisis, tests, localStorage)
+data/subjects.json  Asignaturas precargadas (opcional)
 ```
 
-> Nota: los planes temáticos precargados son borradores de referencia.
-> Verifica siempre con el plan oficial de tu facultad.
+## Tecnologias
+
+- HTML/CSS/JS vanilla (sin frameworks)
+- PDF.js v3.11 para extraccion de texto
+- localStorage para persistencia
+- GitHub Pages para hosting
+
+## Nota
+
+El analisis se realiza por keywords y patrones en el texto del PDF.
+No reemplaza la revision manual con el plan oficial de tu facultad.

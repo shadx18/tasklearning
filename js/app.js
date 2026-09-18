@@ -1,13 +1,15 @@
 /* =========================================================
-   TaskLearning v3.0 — Plataforma de análisis de asignaturas
+   TaskLearning v3.1 — Plataforma de análisis de asignaturas
    Subes PDFs → plataforma genera plan, repasos, tests,
    resúmenes y ejercicios automáticamente.
    ========================================================= */
 
 const LS_KEY = "tasklearning.subjects.v1";
 const LS_NOTICE = "tasklearning.notice.dismissed";
+const LS_SCORES = "tasklearning.scores.v1";
 let seedSubjects = [];
 let userSubjects = [];
+let testScores = {};
 let filterStatus = "all";
 let filterQuery = "";
 let editingId = null;
@@ -40,6 +42,15 @@ function esc(t) { const d = document.createElement("div"); d.textContent = t ?? 
 function iaLabel(k) { return { kimi: "Kimi", chatgpt: "ChatGPT", claude: "Claude" }[k] || k; }
 function allSubjects() { return [...seedSubjects, ...userSubjects]; }
 
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 /* ---------------- Notificaciones toast ---------------- */
 function toast(msg, type = "ok") {
   document.querySelectorAll(".toast").forEach(t => t.remove());
@@ -58,6 +69,7 @@ async function init() {
     seedSubjects = (await res.json()).subjects || [];
   } catch { seedSubjects = []; }
   userSubjects = loadLocal();
+  testScores = loadScores();
   renderAll();
   bindEvents();
   initAnalyzer();
@@ -71,6 +83,12 @@ function loadLocal() {
   catch { return []; }
 }
 function saveLocal() { localStorage.setItem(LS_KEY, JSON.stringify(userSubjects)); }
+
+function loadScores() {
+  try { return JSON.parse(localStorage.getItem(LS_SCORES)) || {}; }
+  catch { return {}; }
+}
+function saveScores() { localStorage.setItem(LS_SCORES, JSON.stringify(testScores)); }
 
 /* ---------------- Render general ---------------- */
 function renderAll() {
@@ -229,6 +247,8 @@ function deleteSubject(id) {
   if (!s) return;
   if (!confirm(`¿Eliminar "${s.nombre}"? Esta acción no se puede deshacer.`)) return;
   userSubjects = userSubjects.filter(x => x.id !== id);
+  delete testScores[id];
+  saveScores();
   saveLocal(); renderAll();
   toast("Asignatura eliminada");
 }
@@ -328,12 +348,14 @@ function renderDetailTab(tab, s) {
           : `<p class="muted">No hay repasos generados.</p>`}
       </div>`;
 
-    case "tests":
+    case "tests": {
+      const savedScores = testScores[s.id] || {};
       return `<div class="detail-section">
         ${s.tests?.length
-          ? `<div id="test-container">${renderTest(s, 0)}</div>`
+          ? `<div id="test-container">${s.tests.map((_, i) => renderTest(s, i, savedScores)).join("")}</div>`
           : `<p class="muted">No hay tests generados.</p>`}
       </div>`;
+    }
 
     case "ejercicios":
       return `<div class="detail-section">
@@ -355,25 +377,41 @@ function renderDetailTab(tab, s) {
   }
 }
 
-function renderTest(s, testIdx) {
+function renderTest(s, testIdx, savedScores) {
   const test = s.tests[testIdx];
-  if (!test) return `<p class="muted">No hay más tests.</p>`;
+  if (!test) return "";
+  const scoreKey = `${s.id}_test${testIdx}`;
+  const prev = savedScores[testIdx];
+
+  let questionsHtml = test.preguntas.map((pq, qi) => `
+    <div class="test-question">
+      <p><strong>${qi + 1}.</strong> ${esc(pq.pregunta)}</p>
+      <div class="test-options">
+        ${pq.opciones.map((op, oi) => `
+          <label class="test-option" data-q="${qi}" data-o="${oi}">
+            <input type="radio" name="q${testIdx}_${qi}" value="${oi}">
+            <span>${esc(op)}</span>
+          </label>`).join("")}
+      </div>
+    </div>`).join("");
+
+  let resultHtml = "";
+  if (prev) {
+    const pct = Math.round((prev.correct / prev.total) * 100);
+    resultHtml = `
+      <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
+        ${prev.correct}/${prev.total} correctas (${pct}%)
+        ${pct >= 70 ? " — Aprobado" : " — Necesitas repasar"}
+        <span style="opacity:.5;margin-left:8px;font-size:11px">(guardado)</span>
+      </div>`;
+  }
+
   return `
     <div class="test-card" data-test="${testIdx}">
       <h5>Test ${testIdx + 1}: ${esc(test.tema)}</h5>
-      ${test.preguntas.map((pq, qi) => `
-        <div class="test-question">
-          <p><strong>${qi + 1}.</strong> ${esc(pq.pregunta)}</p>
-          <div class="test-options">
-            ${pq.opciones.map((op, oi) => `
-              <label class="test-option" data-q="${qi}" data-o="${oi}">
-                <input type="radio" name="q${testIdx}_${qi}" value="${oi}">
-                <span>${esc(op)}</span>
-              </label>`).join("")}
-          </div>
-        </div>`).join("")}
+      ${questionsHtml}
       <button class="btn btn-primary btn-small btn-check-test" data-test="${testIdx}">Verificar respuestas</button>
-      <div class="test-result" id="test-result-${testIdx}" hidden></div>
+      <div class="test-result" id="test-result-${testIdx}">${resultHtml}</div>
     </div>`;
 }
 
@@ -401,13 +439,19 @@ function bindTabContentEvents(s) {
         });
         if (selected && +selected.value === pq.respuesta) correct++;
       });
+
       const result = byId("test-result-" + testIdx);
-      result.hidden = false;
       const pct = Math.round((correct / test.preguntas.length) * 100);
+
+      if (!testScores[s.id]) testScores[s.id] = {};
+      testScores[s.id][testIdx] = { correct, total: test.preguntas.length, pct, date: Date.now() };
+      saveScores();
+
+      result.hidden = false;
       result.innerHTML = `
         <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
           ${correct}/${test.preguntas.length} correctas (${pct}%)
-          ${pct >= 70 ? " — ¡Aprobado!" : " — Necesitas repasar"}
+          ${pct >= 70 ? " — Aprobado" : " — Necesitas repasar"}
         </div>
         ${test.preguntas.map((pq, qi) => pq.explicacion ? `<div class="test-explain"><strong>${qi + 1}.</strong> ${esc(pq.explicacion)}</div>` : "").join("")}`;
     })
@@ -480,84 +524,53 @@ function analyzeText(fullText, subjectName) {
   const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 3);
   const lower = fullText.toLowerCase();
 
-  // --- Detectar tipo ---
-  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","proposicional","lógica","conjunto","relación"];
-  const progKw = ["código","programa","algoritmo","clase","método","objeto","array","lista","puntero","memoria","compilador","return","for","while","if","herencia","interface","tipo","dato","estructura","base de datos","sql","red","protocolo"];
-  const redaccionKw = ["ensayo","párrafo","redacción","argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión","análisis","crítica","paradigma"];
+  /* --- Detectar tipo de materia --- */
+  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","proposicional","lógica","conjunto","relación","vector","espacio","transformada","factorial","recursión","congruencia","primo","divisibilidad"];
+  const progKw = ["código","programa","algoritmo","clase","método","objeto","array","lista","puntero","memoria","compilador","return","for","while","if","herencia","interface","tipo","dato","estructura","base de datos","sql","red","protocolo","función","recursión","complejidad","orden","pila","cola","árbol","grafo","hash","archivo","excepción","objeto","polimorfismo","encapsulamiento","abstracción"];
+  const redaccionKw = ["ensayo","párrafo","redacción","argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión","análisis","crítica","paradigma","teoría","concepto","definición","contexto","histórico","social","cultura","educación","filosofía"];
 
   const score = (kws) => kws.reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0);
   const scores = { math: score(mathKw), prog: score(progKw), redaccion: score(redaccionKw) };
   const maxScore = Math.max(1, ...Object.values(scores));
 
-  // --- Detectar temas ---
-  const topicPatterns = [
-    /^[\dIVX]+[\.\)\-:]\s+(.+)/,
-    /^tema\s*\d+[\.\:\-]?\s*(.+)/i,
-    /^cap[ií]tulo\s*\d+[\.\:\-]?\s*(.+)/i,
-    /^unidad\s*\d+[\.\:\-]?\s*(.+)/i,
-    /^m[oó]dulo\s*\d+[\.\:\-]?\s*(.+)/i,
-    /^secci[oó]n\s*\d+[\.\:\-]?\s*(.+)/i,
-    /^[\d]+[\.\)]\s+[A-ZÁÉÍÓÚÜ].{10,}/,
-  ];
+  /* --- Detectar temas (mejorado) --- */
+  let topics = detectTopics(lines, fullText);
 
-  let topics = [];
-  lines.forEach(line => {
-    for (const pat of topicPatterns) {
-      const m = line.match(pat);
-      if (m) { topics.push(m[1] ? m[1].trim() : line.trim()); break; }
-    }
-  });
+  /* --- Resumen inteligente --- */
+  const resumen = generateIntelligentSummary(fullText, subjectName, scores);
 
-  if (topics.length < 3) {
-    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 200);
-    const kw = ["tema","capítulo","unidad","módulo","sección","parte","práctica","ejercicio","taller","laboratorio"];
-    sentences.forEach(s => {
-      if (kw.some(k => s.toLowerCase().includes(k)) && topics.length < 15)
-        topics.push(s.split(":").pop().trim().substring(0, 80));
-    });
-  }
-  if (topics.length < 3) {
-    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 15 && s.length < 150);
-    topics = sentences.slice(0, Math.min(10, sentences.length));
-  }
-  topics = [...new Set(topics.map(t => t.replace(/\s+/g, " ").trim()))].slice(0, 20);
-
-  // --- Resumen ---
-  const firstParagraphs = lines.filter(l => l.length > 30).slice(0, 5).join(". ");
-  const resumen = firstParagraphs.substring(0, 500) + (firstParagraphs.length > 500 ? "..." : "");
-
-  // --- Repasos ---
-  const repasos = topics.map(t => ({
+  /* --- Repasos --- */
+  const repasos = topics.slice(0, 15).map(t => ({
     tema: t,
-    contenido: generateReview(t, fullText),
+    contenido: generateReview(t, fullText, scores),
   }));
 
-  // --- Tests ---
-  const tests = topics.map(t => ({
+  /* --- Tests (3-5 preguntas por tema, máximo 10 temas) --- */
+  const tests = topics.slice(0, 10).map(t => ({
     tema: t,
     preguntas: generateQuestions(t, fullText, scores),
-  })).filter(t => t.preguntas.length > 0);
+  })).filter(t => t.preguntas.length >= 3);
 
-  // --- Ejercicios ---
-  const ejercicios = topics.map(t => generateExercise(t, fullText, scores)).filter(Boolean);
+  /* --- Ejercicios --- */
+  const ejercicios = topics.slice(0, 10).map(t => generateExercise(t, fullText, scores)).filter(Boolean);
 
-  // --- Resúmenes ---
-  const resumenes = topics.map(t => ({
+  /* --- Resúmenes por tema --- */
+  const resumenes = topics.slice(0, 15).map(t => ({
     tema: t,
-    contenido: generateSummary(t, fullText),
+    contenido: generateTopicSummary(t, fullText),
   }));
 
-  // --- IA recomendada ---
+  /* --- IA recomendada --- */
   let ia = "kimi", iaRazon = "";
-  if (scores.math / maxScore > 0.4) {
+  if (scores.math / maxScore > 0.35) {
     ia = "chatgpt";
-    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso y demostraciones.";
-  } else if (scores.prog / maxScore > 0.4) {
+    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso, demostraciones y cálculos.";
+  } else if (scores.prog / maxScore > 0.35) {
     ia = "kimi";
-    iaRazon = "Contiene temas de programación/sistemas. Kimi analiza código y genera proyectos.";
-  } else if (scores.redaccion / maxScore > 0.3) {
+    iaRazon = "Contiene temas de programación/sistemas. Kimi analiza código, genera implementaciones y revisa algoritmos.";
+  } else if (scores.redaccion / maxScore > 0.25) {
     ia = "claude";
-    iaRazon = "Contiene temas de redacción/teoría. Claude redige ensayos y revisa estilo académico.";
+    iaRazon = "Contiene temas de redacción/teoría. Claude redige ensayos, revisa estilo académico y estructura argumentativa.";
   } else {
     ia = "kimi";
     iaRazon = "Tema mixto. Kimi trabaja bien con documentos largos y planes de estudio generales.";
@@ -566,128 +579,285 @@ function analyzeText(fullText, subjectName) {
   return { resumen, topics, repasos, tests, ejercicios, resumenes, ia, iaRazon };
 }
 
-function generateReview(topic, fullText) {
-  const lower = fullText.toLowerCase();
-  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
-  let context = "";
-  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 100), Math.min(fullText.length, idx + 600));
+/* ---------------- Detección de temas mejorada ---------------- */
+function detectTopics(lines, fullText) {
+  const topics = [];
+  const seen = new Set();
 
-  const pts = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15).slice(0, 5).map(l => l.trim());
-  if (pts.length === 0) {
-    pts.push(
-      `Definición y conceptos fundamentales.`,
-      `Aplicación práctica y ejemplos.`,
-      `Relación con otros temas del plan.`,
-      `Preguntas frecuentes de examen.`
-    );
+  const addTopic = (t) => {
+    const clean = t.replace(/\s+/g, " ").trim();
+    if (clean.length < 5 || clean.length > 120) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    topics.push(clean);
+  };
+
+  /* Patrón 1: Numeración clara (1., 1.1, I., A), etc.) */
+  const numPatterns = [
+    /^(\d{1,2})\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
+    /^(\d{1,2}\.\d{1,2})\.\s+(.{5,100})/,
+    /^([IVX]+)\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
+    /^([A-Z])\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
+  ];
+
+  /* Patrón 2: Palabras clave de estructura */
+  const structPatterns = [
+    /^(tema|capítulo|unidad|módulo|sección|parte|clase|práctica|taller|laboratorio)\s+\d+[\.\:\-]?\s*(.+)/i,
+    /^(tema|capítulo|unidad|módulo|sección)\s*[\:\-]\s*(.+)/i,
+  ];
+
+  /* Patrón 3: Líneas en mayúsculas o con formato de título */
+  const titlePattern = /^[A-ZÁÉÍÓÚÜ\s]{8,60}$/;
+
+  lines.forEach((line, idx) => {
+    /* Numeración */
+    for (const pat of numPatterns) {
+      const m = line.match(pat);
+      if (m) { addTopic(m[2] || m[1]); break; }
+    }
+
+    /* Estructura */
+    for (const pat of structPatterns) {
+      const m = line.match(pat);
+      if (m) { addTopic(m[2] || m[0]); break; }
+    }
+
+    /* Títulos en mayúsculas (solo si la línea anterior está vacía o es corta) */
+    if (titlePattern.test(line) && topics.length < 20) {
+      const prev = lines[idx - 1] || "";
+      if (prev.length < 10) addTopic(line.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()));
+    }
+  });
+
+  /* Si no se encontraron suficientes temas, usar contenido semántico */
+  if (topics.length < 4) {
+    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 25 && s.length < 180);
+    const kw = ["tema","capítulo","unidad","módulo","sección","parte","práctica","ejercicio","taller","laboratorio","concepto","definición","importante","fundamental","básico","avanzado"];
+    sentences.forEach(s => {
+      if (topics.length >= 15) return;
+      if (kw.some(k => s.toLowerCase().includes(k))) {
+        addTopic(s.split(":").pop().trim().substring(0, 90));
+      }
+    });
   }
 
-  let review = `Repaso: ${topic}\n\n`;
-  review += pts.map((p, i) => `${i + 1}. ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
-  review += `\n\nPuntos clave para el examen:\n`;
-  review += `- Domina la definición y diferencia con conceptos similares.\n`;
-  review += `- Practica al menos 3 ejercicios de cada tipo.\n`;
-  review += `- Revisa ejercicios de parciales anteriores.`;
-  return review;
+  /* Último recurso: oraciones representativas */
+  if (topics.length < 4) {
+    const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 150);
+    const unique = [...new Set(sentences)];
+    unique.slice(0, Math.min(10, unique.length)).forEach(s => addTopic(s));
+  }
+
+  return topics.slice(0, 20);
 }
 
-function generateQuestions(topic, fullText, scores) {
+/* ---------------- Resumen inteligente ---------------- */
+function generateIntelligentSummary(fullText, subjectName, scores) {
+  const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 15);
+  const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 250);
+
+  /* Palabras clave importantes */
+  const importantWords = extractImportantWords(fullText);
+
+  /* Seleccionar oraciones más representativas */
+  const scored = sentences.map(s => {
+    let score = 0;
+    const sl = s.toLowerCase();
+    /* Oraciones con palabras clave valen más */
+    importantWords.forEach(w => { if (sl.includes(w)) score += 2; });
+    /* Oraciones con definiciones */
+    if (sl.includes("es una") || sl.includes("es un") || sl.includes("se define") || sl.includes("consiste en")) score += 3;
+    /* Oraciones con importancia */
+    if (sl.includes("importante") || sl.includes("fundamental") || sl.includes("básico") || sl.includes("clave")) score += 2;
+    /* Oraciones más largas suelen tener más info */
+    if (s.length > 60) score += 1;
+    return { text: s, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.slice(0, 6).map(s => s.text);
+
+  if (top.length === 0) {
+    return `${subjectName}: Asignatura del plan de estudios que requiere estudio detallado. Revisar definiciones, conceptos fundamentales y aplicaciones prácticas.`;
+  }
+
+  let summary = `${subjectName}: ${top[0]}`;
+  if (top.length > 1) summary += ` ${top[1]}`;
+  if (top.length > 2) summary += ` ${top[2]}`;
+
+  /* Detectar tipo */
+  const typeLabel = scores.math > scores.prog && scores.math > scores.redaccion ? "matemática"
+    : scores.prog > scores.redaccion ? "de programación/sistemas"
+    : scores.redaccion > 0 ? "teórica/redacción" : "mixta";
+  summary += `\n\nTipo: ${typeLabel}. Se recomienda practicar con ejercicios y revisar definitiones clave.`;
+
+  return summary.substring(0, 600);
+}
+
+function extractImportantWords(text) {
+  const lower = text.toLowerCase();
+  const words = lower.split(/\W+/).filter(w => w.length > 4);
+  const freq = {};
+  words.forEach(w => { freq[w] = (freq[w] || 0) + 1; });
+  return Object.entries(freq)
+    .filter(([w, c]) => c >= 2 && !["para","como","más","pero","este","esta","todo","otro","otra","desde","hasta","cuando","donde","porque","según","todos","ellas","ellos","tiene","tiene","puede","sobre","otras","estos","estas","cada","ello","otro","ella","ellos","nos","les","dos","uno","una","las","los","que","como","más","pero","este","esta","todo","desde","hasta","cuando","donde","porque","según","hay","son","fue","ser","sin","con","una","por","para","sino","como","más","menos","muy","tan","sólo","solo","aquí","ahí","allí","así","luego","después","antes","aquello","ese","esa","eso","aquel","aquella","esto","ello"].includes(w))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([w]) => w);
+}
+
+/* ---------------- Resumen por tema (mejorado) ---------------- */
+function generateTopicSummary(topic, fullText) {
   const lower = fullText.toLowerCase();
-  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
+  const topicLower = topic.toLowerCase().substring(0, 25);
+  const idx = lower.indexOf(topicLower);
   let context = "";
   if (idx !== -1) context = fullText.substring(Math.max(0, idx - 200), Math.min(fullText.length, idx + 800));
 
+  const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 20);
+
+  if (sentences.length === 0) {
+    return `Tema "${topic}": Concepto del plan de estudios. Revisar definiciones, propiedades y aplicaciones prácticas. Relacionar con otros temas del programa.`;
+  }
+
+  /* Seleccionar oraciones más informativas */
+  const scored = sentences.map(s => {
+    let sc = 0;
+    const sl = s.toLowerCase();
+    if (sl.includes("es una") || sl.includes("es un") || sl.includes("se define") || sl.includes("consiste")) sc += 3;
+    if (sl.includes(topic.toLowerCase().substring(0, 15))) sc += 2;
+    if (s.length > 40) sc += 1;
+    return { text: s, score: sc };
+  }).sort((a, b) => b.score - a.score);
+
+  const top = scored.slice(0, 4).map(s => s.text);
+  let summary = `Resumen de ${topic}:\n\n`;
+  summary += top.map(p => `• ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
+  summary += `\n\nPuntos clave: domina definiciones, practica ejemplos, revisa relación con otros temas.`;
+  return summary.substring(0, 400);
+}
+
+/* ---------------- Repasos (mejorado) ---------------- */
+function generateReview(topic, fullText, scores) {
+  const lower = fullText.toLowerCase();
+  const topicLower = topic.toLowerCase().substring(0, 25);
+  const idx = lower.indexOf(topicLower);
+  let context = "";
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 200), Math.min(fullText.length, idx + 900));
+
   const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 15);
+
+  /* Seleccionar puntos relevantes */
+  const points = sentences.slice(0, 8).map(s => s.charAt(0).toUpperCase() + s.slice(1));
+
+  if (points.length === 0) {
+    points.push(
+      "Definición y conceptos fundamentales del tema.",
+      "Propiedades y características principales.",
+      "Aplicación práctica y ejemplos típicos.",
+      "Relación con otros temas del plan de estudios.",
+      "Preguntas frecuentes de exámenes anteriores."
+    );
+  }
+
+  /* Tips de estudio según el tipo */
+  let studyTips = "";
+  if (scores.math > scores.prog && scores.math > scores.redaccion) {
+    studyTips = "\n\nConsejos de estudio:\n- Resuelve al menos 5 ejercicios de cada tipo\n- Domina las demostraciones paso a paso\n- Revisa fórmulas y teoremas fundamentales\n- Practica con problemas de parciales anteriores";
+  } else if (scores.prog > scores.redaccion) {
+    studyTips = "\n\nConsejos de estudio:\n- Implementa cada algoritmo en código\n- Dibuja diagramas de flujo y estructuras de datos\n- Analiza la complejidad temporal y espacial\n- Practica con problemas de programación competitiva";
+  } else {
+    studyTips = "\n\nConsejos de estudio:\n- Elabora mapas conceptuales del tema\n- Redacta ensayos cortos sobre los conceptos clave\n- Analiza las relaciones causa-efecto\n- Prepara argumentos para debate";
+  }
+
+  let review = `Repaso: ${topic}\n\n`;
+  review += points.slice(0, 5).map((p, i) => `${i + 1}. ${p}.`).join("\n");
+  review += studyTips;
+  return review;
+}
+
+/* ---------------- Generación de preguntas (corregido) ---------------- */
+function generateQuestions(topic, fullText, scores) {
+  const lower = fullText.toLowerCase();
+  const topicLower = topic.toLowerCase().substring(0, 25);
+  const idx = lower.indexOf(topicLower);
+  let context = "";
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 300), Math.min(fullText.length, idx + 1000));
+
+  const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 20);
   const questions = [];
 
-  // Generar 3-5 preguntas por tema
-  const numQ = Math.min(5, Math.max(3, sentences.length));
+  /* Generar 3-5 preguntas */
+  const numQ = Math.min(5, Math.max(3, Math.min(sentences.length, 5)));
 
   for (let i = 0; i < numQ; i++) {
     const base = sentences[i % sentences.length] || topic;
     const words = base.split(/\s+/).filter(w => w.length > 4);
 
+    let correct, wrong1, wrong2, wrong3, pregunta;
+
     if (scores.math > scores.prog && scores.math > scores.redaccion) {
-      // Preguntas matemáticas
-      const correct = base.substring(0, 120);
-      const wrong1 = words.slice(0, 5).join(" ") + " " + words.slice(-3).join(" ");
-      const wrong2 = "Definición de " + topic + " en un contexto diferente";
-      const wrong3 = words.slice(2, 7).join(" ");
-      questions.push({
-        pregunta: `¿Cuál de las siguientes afirmaciones sobre "${topic}" es correcta?`,
-        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
-        respuesta: 0,
-        explicacion: `La respuesta correcta se refiere directamente a: "${correct.substring(0, 80)}..."`,
-      });
+      correct = base.substring(0, 130);
+      wrong1 = words.slice(0, 4).join(" ") + " " + words.slice(-2).join(" ");
+      wrong2 = `La definición de ${topic} en un contexto no relacionado`;
+      wrong3 = words.slice(2, 6).join(" ");
+      pregunta = `¿Cuál de las siguientes afirmaciones sobre "${topic}" es correcta?`;
     } else if (scores.prog > scores.redaccion) {
-      const correct = `Implementar ${topic} requiere considerar: ${base.substring(0, 100)}`;
-      const wrong1 = `${topic} solo se usa en bases de datos`;
-      const wrong2 = `No existe implementación de ${topic}`;
-      const wrong3 = `${topic} es exclusivo de lenguajes orientados a objetos`;
-      questions.push({
-        pregunta: `Sobre la implementación de "${topic}", ¿cuál es correcta?`,
-        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
-        respuesta: 0,
-        explicacion: correct.substring(0, 120),
-      });
+      correct = `En ${topic}: ${base.substring(0, 120)}`;
+      wrong1 = `${topic} solo se aplica en bases de datos relacionales`;
+      wrong2 = `No existe implementación práctica de ${topic}`;
+      wrong3 = `${topic} es exclusivo de un solo lenguaje de programación`;
+      pregunta = `Sobre "${topic}", ¿cuál afirmación es correcta?`;
     } else {
-      const correct = base.substring(0, 120);
-      const wrong1 = `${topic} no tiene relación con el contenido principal`;
-      const wrong2 = `El concepto es opuesto a lo descrito`;
-      const wrong3 = `Solo aplica en contextos no académicos`;
-      questions.push({
-        pregunta: `¿Qué describe correctamente "${topic}"?`,
-        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
-        respuesta: 0,
-        explicacion: `La descripción correcta es: "${correct.substring(0, 80)}..."`,
-      });
+      correct = base.substring(0, 130);
+      wrong1 = `${topic} no tiene relación con el contenido principal de la asignatura`;
+      wrong2 = `El concepto es opuesto a lo descrito en el plan`;
+      wrong3 = `${topic} solo aplica en contextos no académicos`;
+      pregunta = `¿Qué describe correctamente "${topic}"?`;
     }
+
+    /* Crear opciones y aleatorizar correctamente */
+    const opciones = shuffle([correct, wrong1, wrong2, wrong3]);
+    const respuesta = opciones.indexOf(correct);
+
+    questions.push({
+      pregunta,
+      opciones,
+      respuesta,
+      explicacion: `La respuesta correcta es: "${correct.substring(0, 100)}..."`,
+    });
   }
   return questions;
 }
 
+/* ---------------- Ejercicios ---------------- */
 function generateExercise(topic, fullText, scores) {
   const lower = fullText.toLowerCase();
-  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
+  const topicLower = topic.toLowerCase().substring(0, 25);
+  const idx = lower.indexOf(topicLower);
   let context = "";
-  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 100), Math.min(fullText.length, idx + 600));
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 150), Math.min(fullText.length, idx + 700));
 
   const lines = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15);
+  const ref = lines[0]?.substring(0, 120) || topic;
 
-  if (scores.math > scores.prog && scores.math > scores.redaccion) {
+  if (scores.math > scores.prog && scores.redaccion) {
     return {
-      enunciado: `Demuestre o resuelva un problema relacionado con "${topic}". Base teórica: ${lines[0]?.substring(0, 100) || topic}.`,
-      solucion: `Paso 1: Identificar los datos del problema.\nPaso 2: Aplicar la definición/teorema de ${topic}.\nPaso 3: Desarrollar la solución paso a paso.\nPaso 4: Verificar el resultado.`,
+      enunciado: `Resuelva o demuestre un problema relacionado con "${topic}". Base teórica: ${ref}.`,
+      solucion: `Paso 1: Identificar los datos y condiciones del problema.\nPaso 2: Aplicar la definición o teorema de ${topic}.\nPaso 3: Desarrollar la solución paso a paso con justificación.\nPaso 4: Verificar el resultado y escribir la conclusión.`,
     };
   } else if (scores.prog > scores.redaccion) {
     return {
-      enunciado: `Implemente un programa/módulo que aplique "${topic}". Considere: ${lines[0]?.substring(0, 100) || topic}.`,
-      solucion: `Paso 1: Definir la estructura de datos necesaria.\nPaso 2: Implementar la lógica de ${topic}.\nPaso 3: Probar con datos de ejemplo.\nPaso 4: Optimizar y documentar el código.`,
+      enunciado: `Implemente un módulo o función que aplique "${topic}". Considere: ${ref}.`,
+      solucion: `Paso 1: Definir la estructura de datos requerida.\nPaso 2: Implementar la lógica de ${topic} con pseudocódigo o lenguaje real.\nPaso 3: Probar con al menos 3 casos de prueba.\nPaso 4: Analizar complejidad temporal y documentar.`,
     };
   } else {
     return {
-      enunciado: `Desarrolle un ensayo o análisis sobre "${topic}". Fundamente con: ${lines[0]?.substring(0, 100) || topic}.`,
-      solucion: `Paso 1: Investigar las fuentes principales de ${topic}.\nPaso 2: Estructurar la introducción con la tesis.\nPaso 3: Desarrollar los argumentos con evidencias.\nPaso 4: Redactar la conclusión.`,
+      enunciado: `Desarrolle un análisis o ensayo sobre "${topic}". Fundamente con: ${ref}.`,
+      solucion: `Paso 1: Investigar al menos 3 fuentes sobre ${topic}.\nPaso 2: Estructurar la introducción con tesis clara.\nPaso 3: Desarrollar argumentos con evidencias y ejemplos.\nPaso 4: Redactar la conclusión vinculando con la tesis.`,
     };
   }
-}
-
-function generateSummary(topic, fullText) {
-  const lower = fullText.toLowerCase();
-  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
-  let context = "";
-  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 150), Math.min(fullText.length, idx + 500));
-
-  const pts = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15).slice(0, 6).map(l => l.trim());
-
-  if (pts.length === 0) {
-    return `Resumen de ${topic}: Concepto fundamental del plan de estudios que requiere atención especial para el examen. Revisar definiciones, aplicaciones y ejemplos prácticos.`;
-  }
-
-  let summary = `Resumen de ${topic}:\n\n`;
-  summary += pts.map(p => `• ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
-  summary += `\n\nConceptos clave: definición, aplicación práctica, relación con otros temas.`;
-  return summary;
 }
 
 /* =========================================================
@@ -816,7 +986,7 @@ function bindEvents() {
   });
 
   byId("btn-export").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify({ userSubjects }, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ userSubjects, testScores }, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "tasklearning-respaldo.json";
@@ -833,7 +1003,8 @@ function bindEvents() {
         const j = JSON.parse(r.result);
         if (!Array.isArray(j.userSubjects)) throw new Error("formato");
         userSubjects = j.userSubjects;
-        saveLocal(); renderAll();
+        if (j.testScores) testScores = j.testScores;
+        saveLocal(); saveScores(); renderAll();
         toast("Datos importados");
       } catch { toast("Archivo inválido", "error"); }
     };
