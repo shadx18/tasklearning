@@ -1,10 +1,7 @@
 /* =========================================================
-   TaskLearning v2.0 — Lógica de la aplicación
-   Todo es 2do año (CUJAE · Ing. Informática).
-   Datos: subjects.json (asignaturas analizadas por Kimi) +
-          localStorage (asignaturas añadidas por el usuario)
-   PDFs del plan temático: IndexedDB (privados, en el navegador)
-   Repasos por tema: archivos PDF en /repasos/ (generados por Kimi)
+   TaskLearning v3.0 — Plataforma de análisis de asignaturas
+   Subes PDFs → plataforma genera plan, repasos, tests,
+   resúmenes y ejercicios automáticamente.
    ========================================================= */
 
 const LS_KEY = "tasklearning.subjects.v1";
@@ -15,7 +12,7 @@ let filterStatus = "all";
 let filterQuery = "";
 let editingId = null;
 
-/* ---------------- Iconos SVG (reutilizables) ---------------- */
+/* ---------------- Iconos SVG ---------------- */
 const svg = (paths, size = 16) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const I = {
@@ -31,6 +28,10 @@ const I = {
   clock:  svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>', 14),
   book:   svg('<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>', 14),
   plus:   svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>', 15),
+  list:   svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>', 14),
+  quiz:   svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>', 14),
+  edit:   svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>', 14),
+  back:   svg('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>', 16),
 };
 
 /* ---------------- Utilidades ---------------- */
@@ -60,7 +61,7 @@ async function init() {
   renderAll();
   bindEvents();
   initAnalyzer();
-  // Deep-link: index.html#asignaturas / #backup abre esa vista directamente
+  renderSidebarSubjects();
   const h = location.hash.replace("#", "");
   if (["panel", "asignaturas", "backup"].includes(h)) switchView(h);
 }
@@ -76,16 +77,48 @@ function renderAll() {
   renderStats();
   renderDistribution();
   renderSubjects();
+  renderSidebarSubjects();
+}
+
+/* ---------------- Sidebar: asignaturas analizadas ---------------- */
+function renderSidebarSubjects() {
+  const existing = byId("sidebar-subjects");
+  if (existing) existing.remove();
+  const analyzed = allSubjects().filter(s => s.temas?.length);
+  if (!analyzed.length) return;
+
+  const container = document.createElement("div");
+  container.id = "sidebar-subjects";
+  container.innerHTML = `
+    <h4 class="legend-title" style="margin-top:18px">Mis asignaturas</h4>
+    <ul class="sidebar-subjects-list">
+      ${analyzed.map(s => `
+        <li class="sidebar-subject-item" data-id="${s.id}">
+          <span class="dot ${s.ia || 'pending'}"></span>
+          <span>${esc(s.nombre)}</span>
+        </li>`).join("")}
+    </ul>`;
+
+  const footer = byId("sidebar-subjects-placeholder");
+  if (footer) footer.parentNode.insertBefore(container, footer);
+  else byId("sidebar-footer-placeholder").parentNode.appendChild(container);
+
+  container.querySelectorAll(".sidebar-subject-item").forEach(el =>
+    el.addEventListener("click", () => {
+      switchView("asignaturas");
+      setTimeout(() => openDetail(el.dataset.id), 100);
+    })
+  );
 }
 
 /* ---------------- Panel ---------------- */
 function renderStats() {
   const all = allSubjects();
   const stats = [
-    { icon: I.cap,    num: all.length, lbl: "Asignaturas" },
-    { icon: I.book,   num: all.reduce((n, s) => n + (s.temas?.length || 0), 0), lbl: "Temas analizados" },
-    { icon: I.file,   num: all.reduce((n, s) => n + (s.repasos?.length || 0), 0), lbl: "Repasos PDF" },
-    { icon: I.clock,  num: all.filter(s => !s.ia).length, lbl: "Pendientes de análisis", warn: true },
+    { icon: I.cap,   num: all.length, lbl: "Asignaturas" },
+    { icon: I.book,  num: all.reduce((n, s) => n + (s.temas?.length || 0), 0), lbl: "Temas" },
+    { icon: I.quiz,  num: all.reduce((n, s) => n + (s.tests?.length || 0), 0), lbl: "Tests generados" },
+    { icon: I.clock, num: all.filter(s => !s.temas?.length).length, lbl: "Pendientes", warn: true },
   ];
   byId("stats-grid").innerHTML = stats.map(s => `
     <div class="stat-card">
@@ -128,8 +161,8 @@ function renderSubjects() {
   const grid = byId("subjects-grid");
   const q = filterQuery.toLowerCase();
   const list = allSubjects().filter(s => {
-    if (filterStatus === "analyzed" && !s.ia) return false;
-    if (filterStatus === "pending" && s.ia) return false;
+    if (filterStatus === "analyzed" && !s.temas?.length) return false;
+    if (filterStatus === "pending" && s.temas?.length) return false;
     if (q && !(s.nombre || "").toLowerCase().includes(q)) return false;
     return true;
   });
@@ -138,7 +171,7 @@ function renderSubjects() {
     grid.innerHTML = `<div class="empty-state">
       <div class="empty-icon">${I.cap}</div>
       <p class="empty-title">Todavía no hay asignaturas</p>
-      <p class="muted">Agrega la primera y Kimi analizará su plan temático.</p>
+      <p class="muted">Sube un PDF en el Panel para comenzar.</p>
       <button class="btn btn-primary" data-action="add">${I.plus} Agregar la primera</button>
     </div>`;
     return;
@@ -153,27 +186,25 @@ function renderSubjects() {
   }
 
   grid.innerHTML = list.map(s => {
-    const isAnalyzed = !!s.ia;
-    const isSeed = seedSubjects.some(x => x.id === s.id);
+    const analyzed = !!s.temas?.length;
     const nTemas = s.temas?.length || 0;
+    const nTests = s.tests?.length || 0;
     return `<article class="subject-card" data-id="${s.id}" tabindex="0" role="button" aria-label="${esc(s.nombre)}">
       <div class="subject-head">
         <h3>${esc(s.nombre)}</h3>
-        <span class="status-tag ${isAnalyzed ? "ok" : "pending"}">${isAnalyzed ? "Analizada" : "Pendiente"}</span>
+        <span class="status-tag ${analyzed ? "ok" : "pending"}">${analyzed ? "Analizada" : "Pendiente"}</span>
       </div>
       <p class="subject-desc">${esc(s.resumen || s.descripcion || "Sin descripción.")}</p>
       <div class="subject-meta">
         ${nTemas ? `<span>${I.book}${nTemas} tema${nTemas !== 1 ? "s" : ""}</span>` : ""}
-        ${(s.repasos?.length) ? `<span>${I.file}${s.repasos.length} repaso${s.repasos.length !== 1 ? "s" : ""} PDF</span>` : ""}
+        ${nTests ? `<span>${I.quiz}${nTests} test${nTests !== 1 ? "s" : ""}</span>` : ""}
       </div>
       <div class="subject-foot">
-          ${isAnalyzed
+        ${analyzed
           ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>`
           : `<span class="ai-badge pending-badge">Sin analizar</span>`}
         <div class="subject-actions">
-          ${isSeed ? "" : `
-          <button class="icon-btn" data-edit="${s.id}" title="Editar" aria-label="Editar">${I.pencil}</button>
-          <button class="icon-btn danger" data-del="${s.id}" title="Eliminar" aria-label="Eliminar">${I.trash}</button>`}
+          <button class="icon-btn danger" data-del="${s.id}" title="Eliminar" aria-label="Eliminar">${I.trash}</button>
         </div>
       </div>
     </article>`;
@@ -185,7 +216,7 @@ function openSubjectModal(id = null) {
   editingId = id;
   const s = id ? userSubjects.find(x => x.id === id) : null;
   byId("modal-title").textContent = s ? "Editar asignatura" : "Nueva asignatura";
-  byId("btn-save-subject").textContent = s ? "Guardar cambios" : "Guardar y pedir análisis";
+  byId("btn-save-subject").textContent = s ? "Guardar cambios" : "Guardar";
   byId("f-nombre").value = s?.nombre || "";
   byId("f-descripcion").value = s?.descripcion || "";
   byId("modal-subject").classList.add("open");
@@ -202,267 +233,195 @@ function deleteSubject(id) {
   toast("Asignatura eliminada");
 }
 
-/* ---------------- Detalle ---------------- */
+/* =========================================================
+   DETALLE / LANDING DE ASIGNATURA
+   ========================================================= */
 function openDetail(id) {
   const s = allSubjects().find(x => x.id === id);
   if (!s) return;
-  const isAnalyzed = !!s.ia;
-  const isSeed = seedSubjects.some(x => x.id === s.id);
-  const instruccion = `Analiza la asignatura "${s.nombre}" (2do año, carrera Ingeniería Informática, CUJAE — contexto universidades cubanas). Breve descripción: "${s.descripcion || "sin descripción"}". Investiga su plan temático típico. Si encuentras un plan viable, entrégame: 1) resumen general de la asignatura, 2) plan temático con sus temas, 3) un repaso tipo PDF para CADA tema, 4) qué IA me conviene para consultar dudas de esta asignatura (Kimi Moderato / ChatGPT Free / Claude Free) y por qué. Si NO encuentras un plan viable o no estás seguro, dímelo claramente y te subo el PDF oficial del plan temático para que analices el documento directamente.`;
+  const analyzed = !!s.temas?.length;
 
   byId("detail-content").innerHTML = `
     <div class="modal-head">
       <div>
         <h3>${esc(s.nombre)}</h3>
         <div class="detail-badges">
-          ${isAnalyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge pending-badge">Sin analizar</span>`}
-          <span class="status-tag ${isAnalyzed ? "ok" : "pending"}">${isAnalyzed ? "Analizada" : "Pendiente"}</span>
+          ${analyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge pending-badge">Sin analizar</span>`}
+          <span class="status-tag ${analyzed ? "ok" : "pending"}">${analyzed ? "Analizada" : "Pendiente"}</span>
         </div>
       </div>
       <button class="icon-btn" data-close aria-label="Cerrar">${svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>')}</button>
     </div>
 
-    <div class="detail-cta">
-      <div class="detail-cta-title">${I.zap} Análisis con Kimi Work</div>
-      <ol class="steps">
-        <li><strong>Copia</strong> la instrucción de abajo.</li>
-        <li><strong>Pégala</strong> en Kimi Work — si no encuentro un plan viable te pediré el PDF oficial.</li>
-        <li><strong>Sube aquí</strong> el PDF del plan temático si lo tienes (se guarda solo en tu navegador).</li>
-      </ol>
-      <div class="copy-box" id="copy-box">${esc(instruccion)}</div>
-      <div class="cta-actions">
-        <button class="btn btn-primary btn-small" id="btn-copy">${I.copy}<span>Copiar instrucción</span></button>
-        <label class="btn btn-ghost btn-small">${I.ul}<span>Subir PDF</span>
-          <input type="file" id="pdf-input" accept="application/pdf" hidden>
-        </label>
-      </div>
-      <ul class="pdf-list" id="pdf-list"></ul>
+    ${analyzed ? `
+    <div class="detail-tabs" id="detail-tabs">
+      <button class="detail-tab active" data-tab="resumen">${I.book} Resumen</button>
+      <button class="detail-tab" data-tab="plan">${I.list} Plan Temático</button>
+      <button class="detail-tab" data-tab="repasos">${I.file} Repasos</button>
+      <button class="detail-tab" data-tab="tests">${I.quiz} Tests</button>
+      <button class="detail-tab" data-tab="ejercicios">${I.edit} Ejercicios</button>
     </div>
 
-    <div class="detail-section">
-      <h4>Resumen</h4>
-      <p class="muted detail-text">${esc(s.resumen || "Sin análisis todavía — sigue los pasos de arriba.")}</p>
-      ${(s.temas?.length) ? `<div class="topics">${s.temas.map(t => `<span class="topic">${esc(t)}</span>`).join("")}</div>` : ""}
+    <div class="detail-tab-content" id="detail-tab-content">
+      ${renderDetailTab("resumen", s)}
     </div>
 
-    ${(s.repasos?.length) ? `
-    <div class="detail-section">
-      <h4>Repasos por tema (PDF)</h4>
-      <ul class="pdf-list">
-        ${s.repasos.map(r => `<li><span class="pdf-name">${I.file}${esc(r.tema)}</span><a class="btn btn-ghost btn-small" href="${esc(r.file)}" target="_blank" rel="noopener">${I.dl}Descargar</a></li>`).join("")}
-      </ul>
-    </div>` : ""}
-
-    <div class="detail-section">
+    <div class="detail-section" style="margin-top:18px">
       <h4>IA sugerida para dudas</h4>
-      <div class="ia-reason">${isAnalyzed ? esc(s.iaRazon) : "Pendiente — aparecerá aquí cuando Kimi analice la asignatura."}</div>
+      <div class="ia-reason">${esc(s.iaRazon || "No determinada.")}</div>
     </div>
-
-    ${isSeed ? "" : `<div class="detail-section detail-admin">
-      <button class="btn btn-ghost btn-small" id="btn-detail-edit">${I.pencil}Editar</button>
-      <button class="btn btn-danger btn-small" id="btn-detail-del">${I.trash}Eliminar</button>
-    </div>`}
+    ` : `
+    <div class="detail-section">
+      <p class="muted">Esta asignatura aún no ha sido analizada. Sube sus PDFs en el Panel para generar el contenido automáticamente.</p>
+    </div>
+    `}
   `;
 
   byId("modal-detail").classList.add("open");
   const root = byId("detail-content");
 
   root.querySelector("[data-close]").addEventListener("click", closeModals);
-  root.querySelector("#btn-copy").addEventListener("click", ev => {
-    navigator.clipboard.writeText(instruccion).then(() => {
-      const b = ev.currentTarget;
-      b.classList.add("copied");
-      b.innerHTML = `${I.check}<span>Copiado — pégalo en Kimi Work</span>`;
-      setTimeout(() => { b.classList.remove("copied"); b.innerHTML = `${I.copy}<span>Copiar instrucción</span>`; }, 2600);
-    });
-  });
-  root.querySelector("#pdf-input").addEventListener("change", e => {
-    savePdf(s.id, e.target.files[0]).then(() => toast("PDF guardado en tu navegador"));
-  });
-  const btnEdit = root.querySelector("#btn-detail-edit");
-  if (btnEdit) btnEdit.addEventListener("click", () => { closeModals(); openSubjectModal(s.id); });
-  const btnDel = root.querySelector("#btn-detail-del");
-  if (btnDel) btnDel.addEventListener("click", () => { closeModals(); deleteSubject(s.id); });
 
-  renderPdfList(s.id);
+  if (analyzed) {
+    root.querySelectorAll(".detail-tab").forEach(tab =>
+      tab.addEventListener("click", () => {
+        root.querySelectorAll(".detail-tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        byId("detail-tab-content").innerHTML = renderDetailTab(tab.dataset.tab, s);
+        bindTabContentEvents(s);
+      })
+    );
+    bindTabContentEvents(s);
+  }
 }
 
-/* ---------------- PDFs del plan temático (IndexedDB) ---------------- */
-let db;
-function openDb() {
-  return new Promise((resolve, reject) => {
-    if (db) return resolve(db);
-    const req = indexedDB.open("tasklearning", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("pdfs", { keyPath: "key" });
-    req.onsuccess = () => { db = req.result; resolve(db); };
-    req.onerror = reject;
-  });
+function renderDetailTab(tab, s) {
+  switch (tab) {
+    case "resumen":
+      return `<div class="detail-section">
+        <p class="detail-text">${esc(s.resumen || "Sin resumen.")}</p>
+        ${s.temas?.length ? `<div class="topics">${s.temas.map(t => `<span class="topic">${esc(typeof t === "string" ? t : t.nombre)}</span>`).join("")}</div>` : ""}
+      </div>`;
+
+    case "plan":
+      return `<div class="detail-section">
+        ${s.temas?.length
+          ? `<ol class="plan-list">${s.temas.map((t, i) => {
+              const name = typeof t === "string" ? t : t.nombre;
+              const content = typeof t === "object" ? t.contenido : "";
+              return `<li class="plan-item">
+                <strong>${esc(name)}</strong>
+                ${content ? `<p class="muted">${esc(content)}</p>` : ""}
+              </li>`;
+            }).join("")}</ol>`
+          : `<p class="muted">No se detectaron temas.</p>`}
+      </div>`;
+
+    case "repasos":
+      return `<div class="detail-section">
+        ${s.repasos?.length
+          ? s.repasos.map(r => `
+            <div class="review-card">
+              <h5>${esc(r.tema)}</h5>
+              <div class="review-content">${esc(r.contenido).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>")}</div>
+            </div>`).join("")
+          : `<p class="muted">No hay repasos generados.</p>`}
+      </div>`;
+
+    case "tests":
+      return `<div class="detail-section">
+        ${s.tests?.length
+          ? `<div id="test-container">${renderTest(s, 0)}</div>`
+          : `<p class="muted">No hay tests generados.</p>`}
+      </div>`;
+
+    case "ejercicios":
+      return `<div class="detail-section">
+        ${s.ejercicios?.length
+          ? s.ejercicios.map((ex, i) => `
+            <div class="exercise-card">
+              <h5>Ejercicio ${i + 1}</h5>
+              <p class="exercise-stmt">${esc(ex.enunciado)}</p>
+              <button class="btn btn-ghost btn-small btn-show-solution" data-idx="${i}">Ver solución</button>
+              <div class="exercise-solution" id="sol-${i}" hidden>
+                <p>${esc(ex.solucion).replace(/\n/g, "<br>")}</p>
+              </div>
+            </div>`).join("")
+          : `<p class="muted">No hay ejercicios generados.</p>`}
+      </div>`;
+
+    default:
+      return "";
+  }
 }
-async function savePdf(subjectId, file) {
-  if (!file) return;
-  const d = await openDb();
-  await new Promise((res, rej) => {
-    const tx = d.transaction("pdfs", "readwrite");
-    tx.objectStore("pdfs").put({ key: subjectId + "/" + file.name, subjectId, name: file.name, size: file.size, date: new Date().toISOString(), blob: file });
-    tx.oncomplete = res; tx.onerror = rej;
-  });
-  renderPdfList(subjectId);
-}
-async function renderPdfList(subjectId) {
-  const el = byId("pdf-list");
-  if (!el) return;
-  try {
-    const d = await openDb();
-    const rows = await new Promise(res => {
-      const out = [];
-      const cur = d.transaction("pdfs").objectStore("pdfs").openCursor();
-      cur.onsuccess = () => {
-        if (cur.result) { if (cur.result.value.subjectId === subjectId) out.push(cur.result.value); cur.result.continue(); }
-        else res(out);
-      };
-    });
-    el.innerHTML = rows.length
-      ? rows.map(r => `<li><span class="pdf-name">${I.file}${esc(r.name)}</span><span class="muted">${(r.size / 1024).toFixed(0)} KB</span></li>`).join("")
-      : `<li class="muted">Sin PDFs todavía</li>`;
-  } catch { el.innerHTML = `<li class="muted">Sin PDFs todavía</li>`; }
+
+function renderTest(s, testIdx) {
+  const test = s.tests[testIdx];
+  if (!test) return `<p class="muted">No hay más tests.</p>`;
+  return `
+    <div class="test-card" data-test="${testIdx}">
+      <h5>Test ${testIdx + 1}: ${esc(test.tema)}</h5>
+      ${test.preguntas.map((pq, qi) => `
+        <div class="test-question">
+          <p><strong>${qi + 1}.</strong> ${esc(pq.pregunta)}</p>
+          <div class="test-options">
+            ${pq.opciones.map((op, oi) => `
+              <label class="test-option" data-q="${qi}" data-o="${oi}">
+                <input type="radio" name="q${testIdx}_${qi}" value="${oi}">
+                <span>${esc(op)}</span>
+              </label>`).join("")}
+          </div>
+        </div>`).join("")}
+      <button class="btn btn-primary btn-small btn-check-test" data-test="${testIdx}">Verificar respuestas</button>
+      <div class="test-result" id="test-result-${testIdx}" hidden></div>
+    </div>`;
 }
 
-/* ---------------- Eventos globales ---------------- */
-function bindEvents() {
-  // Navegación
-  document.querySelectorAll(".nav-item[data-view]").forEach(b =>
-    b.addEventListener("click", () => switchView(b.dataset.view)));
+function bindTabContentEvents(s) {
+  byId("detail-content").querySelectorAll(".btn-show-solution").forEach(btn =>
+    btn.addEventListener("click", () => {
+      const sol = byId("sol-" + btn.dataset.idx);
+      sol.hidden = !sol.hidden;
+      btn.textContent = sol.hidden ? "Ver solución" : "Ocultar solución";
+    })
+  );
 
-  // Alta de asignatura: un único punto de entrada (topbar)
-  byId("btn-add-top").addEventListener("click", () => openSubjectModal());
-
-  // Cierre de modales
-  document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", closeModals));
-  document.querySelectorAll(".modal-overlay").forEach(m =>
-    m.addEventListener("click", e => { if (e.target === m) closeModals(); }));
-  document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
-
-  // Delegación de eventos en la cuadrícula (sobrevive a re-renders)
-  const grid = byId("subjects-grid");
-  grid.addEventListener("click", e => {
-    const add = e.target.closest('[data-action="add"]');
-    if (add) { openSubjectModal(); return; }
-    const edit = e.target.closest("[data-edit]");
-    if (edit) { e.stopPropagation(); openSubjectModal(edit.dataset.edit); return; }
-    const del = e.target.closest("[data-del]");
-    if (del) { e.stopPropagation(); deleteSubject(del.dataset.del); return; }
-    const card = e.target.closest(".subject-card");
-    if (card) openDetail(card.dataset.id);
-  });
-  grid.addEventListener("keydown", e => {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    const card = e.target.closest(".subject-card");
-    if (card) { e.preventDefault(); openDetail(card.dataset.id); }
-  });
-
-  // Filtros y búsqueda
-  document.querySelectorAll(".filter-chip").forEach(c => c.addEventListener("click", () => {
-    document.querySelectorAll(".filter-chip").forEach(x => x.classList.remove("active"));
-    c.classList.add("active");
-    filterStatus = c.dataset.filter;
-    renderSubjects();
-  }));
-  byId("search-input").addEventListener("input", e => {
-    filterQuery = e.target.value.trim();
-    renderSubjects();
-  });
-
-  // Aviso descartable
-  if (!localStorage.getItem(LS_NOTICE)) byId("notice").hidden = false;
-  byId("notice-close").addEventListener("click", () => {
-    byId("notice").hidden = true;
-    localStorage.setItem(LS_NOTICE, "1");
-  });
-
-  // Formulario
-  byId("form-subject").addEventListener("submit", e => {
-    e.preventDefault();
-    const data = {
-      nombre: byId("f-nombre").value.trim(),
-      descripcion: byId("f-descripcion").value.trim(),
-      anno: "2",
-      semestre: "",
-    };
-    let newId = null;
-    if (editingId) {
-      const s = userSubjects.find(x => x.id === editingId);
-      Object.assign(s, data);
-      newId = editingId;
-    } else {
-      newId = "u_" + Date.now();
-      userSubjects.push({
-        id: newId, ...data,
-        resumen: "", temas: [], repasos: [], ia: null, iaRazon: "",
-        pendienteAnalisis: true,
+  byId("detail-content").querySelectorAll(".btn-check-test").forEach(btn =>
+    btn.addEventListener("click", () => {
+      const testIdx = +btn.dataset.test;
+      const test = s.tests[testIdx];
+      let correct = 0;
+      test.preguntas.forEach((pq, qi) => {
+        const selected = byId("detail-content").querySelector(`input[name="q${testIdx}_${qi}"]:checked`);
+        const options = byId("detail-content").querySelectorAll(`[data-q="${qi}"]`);
+        options.forEach((opt, oi) => {
+          opt.classList.remove("test-correct", "test-wrong");
+          if (oi === pq.respuesta) opt.classList.add("test-correct");
+          if (selected && +selected.value === oi && oi !== pq.respuesta) opt.classList.add("test-wrong");
+        });
+        if (selected && +selected.value === pq.respuesta) correct++;
       });
-    }
-    const wasEditing = !!editingId;
-    saveLocal(); renderAll(); closeModals();
-    if (wasEditing) {
-      toast("Cambios guardados");
-    } else {
-      toast("Asignatura guardada — aquí tienes la instrucción para Kimi");
-      openDetail(newId); // flujo directo: sin buscar el botón a mano
-    }
-  });
-
-  // Respaldo
-  byId("btn-export").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify({ userSubjects }, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "tasklearning-respaldo.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast("Respaldo descargado");
-  });
-  byId("import-file").addEventListener("change", e => {
-    const f = e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try {
-        const j = JSON.parse(r.result);
-        if (!Array.isArray(j.userSubjects)) throw new Error("formato");
-        userSubjects = j.userSubjects;
-        saveLocal(); renderAll();
-        toast("Datos importados correctamente");
-      } catch { toast("Archivo inválido", "error"); }
-    };
-    r.readAsText(f);
-  });
-}
-
-function switchView(v) {
-  document.querySelectorAll(".nav-item[data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === v));
-  document.querySelectorAll(".view").forEach(s => s.classList.remove("active"));
-  byId("view-" + v).classList.add("active");
-  const titles = {
-    panel: ["Panel", "Resumen de tu 2do año"],
-    asignaturas: ["Asignaturas", `${allSubjects().length} registradas · toca una tarjeta para ver el detalle`],
-    backup: ["Respaldo", "Exporta o importa tus datos"],
-  };
-  byId("view-title").textContent = titles[v][0];
-  byId("view-subtitle").textContent = titles[v][1];
+      const result = byId("test-result-" + testIdx);
+      result.hidden = false;
+      const pct = Math.round((correct / test.preguntas.length) * 100);
+      result.innerHTML = `
+        <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
+          ${correct}/${test.preguntas.length} correctas (${pct}%)
+          ${pct >= 70 ? " — ¡Aprobado!" : " — Necesitas repasar"}
+        </div>
+        ${test.preguntas.map((pq, qi) => pq.explicacion ? `<div class="test-explain"><strong>${qi + 1}.</strong> ${esc(pq.explicacion)}</div>` : "").join("")}`;
+    })
+  );
 }
 
 /* =========================================================
    ANALIZADOR DE ASIGNATURAS
-   Extrae texto de PDFs, genera plan temático, repasos y
-   recomienda la mejor IA.
    ========================================================= */
-
 let analyzerFiles = [];
 
 function initAnalyzer() {
   const dz = byId("dropzone");
   const fi = byId("analyzer-files");
-  const fl = byId("analyzer-file-list");
   const btn = byId("btn-analyze");
 
   dz.addEventListener("click", () => fi.click());
@@ -493,9 +452,6 @@ function renderAnalyzerFileList() {
     b.addEventListener("click", () => { analyzerFiles.splice(+b.dataset.idx, 1); renderAnalyzerFileList(); })
   );
   btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
-  byId("analyzer-name").addEventListener("input", () => {
-    btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
-  });
 }
 
 async function extractPdfText(file) {
@@ -517,27 +473,30 @@ function setProgress(pct, msg) {
   byId("progress-text").textContent = msg;
 }
 
-function analyzeText(fullText) {
+/* =========================================================
+   ANÁLISIS DE CONTENIDO — genera todo automáticamente
+   ========================================================= */
+function analyzeText(fullText, subjectName) {
   const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 3);
   const lower = fullText.toLowerCase();
 
-  // Detectar tipo de materia
-  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","gráfico","nodo","arista"];
-  const progKw = ["código","programa","algoritmo","clase","método","función","objeto","array","lista","puntero","memoria","compilador","int","string","void","return","for","while","if","clase","herencia","interface","tipo","dato"];
-  const theoryKw = ["definición","propiedad","axioma","ley","principio","teoría","concepto","paradigma","enfoque","modelo","análisis","síntesis","comparación","crítica"];
-  const redaccionKw = ["ensayo","párrafo","redacción",".argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión"];
+  // --- Detectar tipo ---
+  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","proposicional","lógica","conjunto","relación"];
+  const progKw = ["código","programa","algoritmo","clase","método","objeto","array","lista","puntero","memoria","compilador","return","for","while","if","herencia","interface","tipo","dato","estructura","base de datos","sql","red","protocolo"];
+  const redaccionKw = ["ensayo","párrafo","redacción","argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión","análisis","crítica","paradigma"];
 
   const score = (kws) => kws.reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0);
-  const scores = { math: score(mathKw), prog: score(progKw), theory: score(theoryKw), redaccion: score(redaccionKw) };
+  const scores = { math: score(mathKw), prog: score(progKw), redaccion: score(redaccionKw) };
   const maxScore = Math.max(1, ...Object.values(scores));
 
-  // Detectar temas: buscar líneas que parezcan títulos o numerados
+  // --- Detectar temas ---
   const topicPatterns = [
     /^[\dIVX]+[\.\)\-:]\s+(.+)/,
     /^tema\s*\d+[\.\:\-]?\s*(.+)/i,
     /^cap[ií]tulo\s*\d+[\.\:\-]?\s*(.+)/i,
     /^unidad\s*\d+[\.\:\-]?\s*(.+)/i,
     /^m[oó]dulo\s*\d+[\.\:\-]?\s*(.+)/i,
+    /^secci[oó]n\s*\d+[\.\:\-]?\s*(.+)/i,
     /^[\d]+[\.\)]\s+[A-ZÁÉÍÓÚÜ].{10,}/,
   ];
 
@@ -549,92 +508,191 @@ function analyzeText(fullText) {
     }
   });
 
-  // Si no se detectaron temas, extraer de oraciones clave
   if (topics.length < 3) {
     const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 200);
-    const keywords = ["tema","capítulo","unidad","módulo","sección","parte","apunte","práctica","ejercicio","parcial","final","taller","laboratorio"];
+    const kw = ["tema","capítulo","unidad","módulo","sección","parte","práctica","ejercicio","taller","laboratorio"];
     sentences.forEach(s => {
-      const sl = s.toLowerCase();
-      if (keywords.some(k => sl.includes(k)) && topics.length < 15) {
+      if (kw.some(k => s.toLowerCase().includes(k)) && topics.length < 15)
         topics.push(s.split(":").pop().trim().substring(0, 80));
-      }
     });
   }
-
-  // Fallback: tomar primeras oraciones sustanciosas
   if (topics.length < 3) {
     const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 15 && s.length < 150);
     topics = sentences.slice(0, Math.min(10, sentences.length));
   }
-
-  // Limpiar y deduplicar
   topics = [...new Set(topics.map(t => t.replace(/\s+/g, " ").trim()))].slice(0, 20);
 
-  // Generar repasos por tema
+  // --- Resumen ---
+  const firstParagraphs = lines.filter(l => l.length > 30).slice(0, 5).join(". ");
+  const resumen = firstParagraphs.substring(0, 500) + (firstParagraphs.length > 500 ? "..." : "");
+
+  // --- Repasos ---
   const repasos = topics.map(t => ({
     tema: t,
     contenido: generateReview(t, fullText),
   }));
 
-  // Resumen general
-  const wordCount = fullText.split(/\s+/).length;
-  const firstParagraphs = lines.filter(l => l.length > 30).slice(0, 5).join(". ");
-  const resumen = firstParagraphs.substring(0, 400) + (firstParagraphs.length > 400 ? "..." : "");
+  // --- Tests ---
+  const tests = topics.map(t => ({
+    tema: t,
+    preguntas: generateQuestions(t, fullText, scores),
+  })).filter(t => t.preguntas.length > 0);
 
-  // Recomendar IA
-  let ia = "chatgpt";
-  let iaRazon = "";
+  // --- Ejercicios ---
+  const ejercicios = topics.map(t => generateExercise(t, fullText, scores)).filter(Boolean);
+
+  // --- Resúmenes ---
+  const resumenes = topics.map(t => ({
+    tema: t,
+    contenido: generateSummary(t, fullText),
+  }));
+
+  // --- IA recomendada ---
+  let ia = "kimi", iaRazon = "";
   if (scores.math / maxScore > 0.4) {
     ia = "chatgpt";
-    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso, ecuaciones y demostraciones de forma clara.";
+    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso y demostraciones.";
   } else if (scores.prog / maxScore > 0.4) {
     ia = "kimi";
-    iaRazon = "Contiene temas de programación. Kimi genera proyectos de código, analiza algoritmos y explica estructuras de datos con ejemplos.";
+    iaRazon = "Contiene temas de programación/sistemas. Kimi analiza código y genera proyectos.";
   } else if (scores.redaccion / maxScore > 0.3) {
     ia = "claude";
-    iaRazon = "Contiene temas de redacción/comprensión. Claude redige ensayos, revisa estilo académico y estructura argumentativa.";
+    iaRazon = "Contiene temas de redacción/teoría. Claude redige ensayos y revisa estilo académico.";
   } else {
     ia = "kimi";
-    iaRazon = "Tema mixto o no clasificado. Kimi trabaja bien con documentos largos y planes de estudio generales.";
+    iaRazon = "Tema mixto. Kimi trabaja bien con documentos largos y planes de estudio generales.";
   }
 
-  return { resumen, topics, repasos, ia, iaRazon, wordCount };
+  return { resumen, topics, repasos, tests, ejercicios, resumenes, ia, iaRazon };
 }
 
 function generateReview(topic, fullText) {
   const lower = fullText.toLowerCase();
-  const topicLower = topic.toLowerCase();
-
-  // Buscar contexto alrededor del tema
-  const idx = lower.indexOf(topicLower.substring(0, 20));
+  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
   let context = "";
-  if (idx !== -1) {
-    const start = Math.max(0, idx - 100);
-    const end = Math.min(fullText.length, idx + 500);
-    context = fullText.substring(start, end);
-  }
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 100), Math.min(fullText.length, idx + 600));
 
-  const lines = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15);
-  const keyPoints = lines.slice(0, 5).map(l => l.trim());
-
-  if (keyPoints.length === 0) {
-    keyPoints.push(
-      `Definición y conceptos fundamentales de ${topic}.`,
-      `Aplicación práctica y ejemplos representativos.`,
-      `Relación con otros temas del plan de estudios.`,
-      `Preguntas frecuentes de examen sobre este tema.`
+  const pts = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15).slice(0, 5).map(l => l.trim());
+  if (pts.length === 0) {
+    pts.push(
+      `Definición y conceptos fundamentales.`,
+      `Aplicación práctica y ejemplos.`,
+      `Relación con otros temas del plan.`,
+      `Preguntas frecuentes de examen.`
     );
   }
 
-  let review = `**Repaso: ${topic}**\n\n`;
-  review += keyPoints.map((p, i) => `${i + 1}. ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
-  review += `\n\n**Puntos clave para el examen:**\n`;
+  let review = `Repaso: ${topic}\n\n`;
+  review += pts.map((p, i) => `${i + 1}. ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
+  review += `\n\nPuntos clave para el examen:\n`;
   review += `- Domina la definición y diferencia con conceptos similares.\n`;
   review += `- Practica al menos 3 ejercicios de cada tipo.\n`;
-  review += `- Revisa ejercicios de parciales anteriores relacionados.`;
+  review += `- Revisa ejercicios de parciales anteriores.`;
   return review;
 }
 
+function generateQuestions(topic, fullText, scores) {
+  const lower = fullText.toLowerCase();
+  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
+  let context = "";
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 200), Math.min(fullText.length, idx + 800));
+
+  const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 15);
+  const questions = [];
+
+  // Generar 3-5 preguntas por tema
+  const numQ = Math.min(5, Math.max(3, sentences.length));
+
+  for (let i = 0; i < numQ; i++) {
+    const base = sentences[i % sentences.length] || topic;
+    const words = base.split(/\s+/).filter(w => w.length > 4);
+
+    if (scores.math > scores.prog && scores.math > scores.redaccion) {
+      // Preguntas matemáticas
+      const correct = base.substring(0, 120);
+      const wrong1 = words.slice(0, 5).join(" ") + " " + words.slice(-3).join(" ");
+      const wrong2 = "Definición de " + topic + " en un contexto diferente";
+      const wrong3 = words.slice(2, 7).join(" ");
+      questions.push({
+        pregunta: `¿Cuál de las siguientes afirmaciones sobre "${topic}" es correcta?`,
+        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
+        respuesta: 0,
+        explicacion: `La respuesta correcta se refiere directamente a: "${correct.substring(0, 80)}..."`,
+      });
+    } else if (scores.prog > scores.redaccion) {
+      const correct = `Implementar ${topic} requiere considerar: ${base.substring(0, 100)}`;
+      const wrong1 = `${topic} solo se usa en bases de datos`;
+      const wrong2 = `No existe implementación de ${topic}`;
+      const wrong3 = `${topic} es exclusivo de lenguajes orientados a objetos`;
+      questions.push({
+        pregunta: `Sobre la implementación de "${topic}", ¿cuál es correcta?`,
+        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
+        respuesta: 0,
+        explicacion: correct.substring(0, 120),
+      });
+    } else {
+      const correct = base.substring(0, 120);
+      const wrong1 = `${topic} no tiene relación con el contenido principal`;
+      const wrong2 = `El concepto es opuesto a lo descrito`;
+      const wrong3 = `Solo aplica en contextos no académicos`;
+      questions.push({
+        pregunta: `¿Qué describe correctamente "${topic}"?`,
+        opciones: [correct, wrong1, wrong2, wrong3].sort(() => Math.random() - 0.5),
+        respuesta: 0,
+        explicacion: `La descripción correcta es: "${correct.substring(0, 80)}..."`,
+      });
+    }
+  }
+  return questions;
+}
+
+function generateExercise(topic, fullText, scores) {
+  const lower = fullText.toLowerCase();
+  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
+  let context = "";
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 100), Math.min(fullText.length, idx + 600));
+
+  const lines = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15);
+
+  if (scores.math > scores.prog && scores.math > scores.redaccion) {
+    return {
+      enunciado: `Demuestre o resuelva un problema relacionado con "${topic}". Base teórica: ${lines[0]?.substring(0, 100) || topic}.`,
+      solucion: `Paso 1: Identificar los datos del problema.\nPaso 2: Aplicar la definición/teorema de ${topic}.\nPaso 3: Desarrollar la solución paso a paso.\nPaso 4: Verificar el resultado.`,
+    };
+  } else if (scores.prog > scores.redaccion) {
+    return {
+      enunciado: `Implemente un programa/módulo que aplique "${topic}". Considere: ${lines[0]?.substring(0, 100) || topic}.`,
+      solucion: `Paso 1: Definir la estructura de datos necesaria.\nPaso 2: Implementar la lógica de ${topic}.\nPaso 3: Probar con datos de ejemplo.\nPaso 4: Optimizar y documentar el código.`,
+    };
+  } else {
+    return {
+      enunciado: `Desarrolle un ensayo o análisis sobre "${topic}". Fundamente con: ${lines[0]?.substring(0, 100) || topic}.`,
+      solucion: `Paso 1: Investigar las fuentes principales de ${topic}.\nPaso 2: Estructurar la introducción con la tesis.\nPaso 3: Desarrollar los argumentos con evidencias.\nPaso 4: Redactar la conclusión.`,
+    };
+  }
+}
+
+function generateSummary(topic, fullText) {
+  const lower = fullText.toLowerCase();
+  const idx = lower.indexOf(topic.toLowerCase().substring(0, 20));
+  let context = "";
+  if (idx !== -1) context = fullText.substring(Math.max(0, idx - 150), Math.min(fullText.length, idx + 500));
+
+  const pts = context.split(/[\.!\n]+/).filter(l => l.trim().length > 15).slice(0, 6).map(l => l.trim());
+
+  if (pts.length === 0) {
+    return `Resumen de ${topic}: Concepto fundamental del plan de estudios que requiere atención especial para el examen. Revisar definiciones, aplicaciones y ejemplos prácticos.`;
+  }
+
+  let summary = `Resumen de ${topic}:\n\n`;
+  summary += pts.map(p => `• ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
+  summary += `\n\nConceptos clave: definición, aplicación práctica, relación con otros temas.`;
+  return summary;
+}
+
+/* =========================================================
+   EJECUCIÓN DEL ANÁLISIS
+   ========================================================= */
 async function runAnalysis() {
   const name = byId("analyzer-name").value.trim();
   if (!name || !analyzerFiles.length) return;
@@ -646,66 +704,154 @@ async function runAnalysis() {
   try {
     let fullText = "";
     for (let i = 0; i < analyzerFiles.length; i++) {
-      setProgress((i / analyzerFiles.length) * 60, `Leyendo PDF ${i + 1} de ${analyzerFiles.length}: ${analyzerFiles[i].name}`);
+      setProgress((i / analyzerFiles.length) * 60, `Leyendo PDF ${i + 1}/${analyzerFiles.length}: ${analyzerFiles[i].name}`);
       const text = await extractPdfText(analyzerFiles[i]);
       fullText += text + "\n\n";
     }
 
     if (!fullText.trim()) {
-      toast("No se pudo extraer texto de los PDFs. Pueden ser imágenes escaneadas.", "error");
+      toast("No se pudo extraer texto. Pueden ser imágenes escaneadas.", "error");
       return;
     }
 
-    setProgress(70, "Analizando contenido y detectando temas...");
-    await new Promise(r => setTimeout(r, 400));
-
-    const result = analyzeText(fullText);
-
-    setProgress(85, "Generando plan temático y repasos...");
+    setProgress(70, "Analizando contenido...");
     await new Promise(r => setTimeout(r, 300));
 
-    // Crear o actualizar la asignatura en userSubjects
+    const result = analyzeText(fullText, name);
+
+    setProgress(85, "Generando tests y ejercicios...");
+    await new Promise(r => setTimeout(r, 300));
+
     let subject = userSubjects.find(s => s.nombre.toLowerCase() === name.toLowerCase());
     if (!subject) {
-      subject = {
-        id: "u_" + Date.now(),
-        nombre: name,
-        descripcion: `Análisis automático de ${analyzerFiles.length} PDF(s)`,
-        anno: "2", semestre: "",
-      };
+      subject = { id: "u_" + Date.now(), nombre: name, descripcion: `Análisis de ${analyzerFiles.length} PDF(s)`, anno: "2", semestre: "" };
       userSubjects.push(subject);
     }
 
-    subject.resumen = result.resumen;
-    subject.temas = result.topics;
-    subject.repasos = result.repasos;
-    subject.ia = result.ia;
-    subject.iaRazon = result.iaRazon;
-    subject.pendienteAnalisis = false;
+    Object.assign(subject, {
+      resumen: result.resumen, temas: result.topics, repasos: result.repasos,
+      tests: result.tests, ejercicios: result.ejercicios, resumenes: result.resumenes,
+      ia: result.ia, iaRazon: result.iaRazon, pendienteAnalisis: false,
+    });
 
-    setProgress(95, "Guardando resultados...");
+    setProgress(95, "Guardando...");
     await new Promise(r => setTimeout(r, 200));
 
-    saveLocal();
-    renderAll();
-
-    setProgress(100, "Análisis completado.");
+    saveLocal(); renderAll();
+    setProgress(100, "Completado.");
     analyzerFiles = [];
     renderAnalyzerFileList();
     byId("analyzer-name").value = "";
 
-    toast(`"${name}" analizada: ${result.topics.length} temas, ${result.repasos.length} repasos generados`);
+    toast(`"${name}": ${result.topics.length} temas, ${result.tests.length} tests, ${result.ejercicios.length} ejercicios`);
     setTimeout(() => { byId("analyzer-progress").hidden = true; }, 2000);
 
     openDetail(subject.id);
   } catch (err) {
-    toast("Error al analizar: " + err.message, "error");
+    toast("Error: " + err.message, "error");
     console.error(err);
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Analizar asignatura`;
     btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
   }
+}
+
+/* ---------------- Eventos globales ---------------- */
+function bindEvents() {
+  document.querySelectorAll(".nav-item[data-view]").forEach(b =>
+    b.addEventListener("click", () => switchView(b.dataset.view)));
+
+  byId("btn-add-top").addEventListener("click", () => openSubjectModal());
+
+  document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", closeModals));
+  document.querySelectorAll(".modal-overlay").forEach(m =>
+    m.addEventListener("click", e => { if (e.target === m) closeModals(); }));
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
+
+  const grid = byId("subjects-grid");
+  grid.addEventListener("click", e => {
+    const add = e.target.closest('[data-action="add"]');
+    if (add) { openSubjectModal(); return; }
+    const del = e.target.closest("[data-del]");
+    if (del) { e.stopPropagation(); deleteSubject(del.dataset.del); return; }
+    const card = e.target.closest(".subject-card");
+    if (card) openDetail(card.dataset.id);
+  });
+  grid.addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const card = e.target.closest(".subject-card");
+    if (card) { e.preventDefault(); openDetail(card.dataset.id); }
+  });
+
+  document.querySelectorAll(".filter-chip").forEach(c => c.addEventListener("click", () => {
+    document.querySelectorAll(".filter-chip").forEach(x => x.classList.remove("active"));
+    c.classList.add("active");
+    filterStatus = c.dataset.filter;
+    renderSubjects();
+  }));
+  byId("search-input").addEventListener("input", e => {
+    filterQuery = e.target.value.trim();
+    renderSubjects();
+  });
+
+  if (!localStorage.getItem(LS_NOTICE)) byId("notice").hidden = false;
+  byId("notice-close").addEventListener("click", () => {
+    byId("notice").hidden = true;
+    localStorage.setItem(LS_NOTICE, "1");
+  });
+
+  byId("form-subject").addEventListener("submit", e => {
+    e.preventDefault();
+    const data = { nombre: byId("f-nombre").value.trim(), descripcion: byId("f-descripcion").value.trim(), anno: "2", semestre: "" };
+    if (editingId) {
+      Object.assign(userSubjects.find(x => x.id === editingId), data);
+      toast("Cambios guardados");
+    } else {
+      const newId = "u_" + Date.now();
+      userSubjects.push({ id: newId, ...data, resumen: "", temas: [], repasos: [], tests: [], ejercicios: [], resumenes: [], ia: null, iaRazon: "" });
+      toast("Asignatura guardada");
+    }
+    saveLocal(); renderAll(); closeModals();
+  });
+
+  byId("btn-export").addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify({ userSubjects }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "tasklearning-respaldo.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("Respaldo descargado");
+  });
+  byId("import-file").addEventListener("change", e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const j = JSON.parse(r.result);
+        if (!Array.isArray(j.userSubjects)) throw new Error("formato");
+        userSubjects = j.userSubjects;
+        saveLocal(); renderAll();
+        toast("Datos importados");
+      } catch { toast("Archivo inválido", "error"); }
+    };
+    r.readAsText(f);
+  });
+}
+
+function switchView(v) {
+  document.querySelectorAll(".nav-item[data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === v));
+  document.querySelectorAll(".view").forEach(s => s.classList.remove("active"));
+  byId("view-" + v).classList.add("active");
+  const titles = {
+    panel: ["Panel", "Resumen de tu semestre"],
+    asignaturas: ["Asignaturas", `${allSubjects().length} registradas · toca una tarjeta para ver el detalle`],
+    backup: ["Respaldo", "Exporta o importa tus datos"],
+  };
+  byId("view-title").textContent = titles[v][0];
+  byId("view-subtitle").textContent = titles[v][1];
 }
 
 init();
