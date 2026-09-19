@@ -149,48 +149,52 @@ async function fetchSubjectFromBackend(subjectId) {
 }
 
 function mapBackendSubject(s) {
-  const units = (s.units || []).flatMap(u => (u.topics || []).map(t => ({
-    nombre: t.name,
-    contenido: t.content_summary || t.description || "",
-    objectives: tryParse(t.objectives),
-    concepts: (t.concepts || []).map(c => ({ name: c.name, definition: c.definition })),
-    summaries: (t.summaries || []).map(sm => ({ content: sm.content })),
-    questions: (t.questions || []).map(q => ({
-      type: q.type,
-      question_text: q.question_text,
-      options: tryParse(q.options),
-      correct_answer: q.correct_answer,
-      explanation: q.explanation,
-    })),
-    flashcards: (t.flashcards || []).map(f => ({ front: f.front, back: f.back, difficulty: f.difficulty })),
-    exercises: (t.exercises || []).map(e => ({ statement: e.statement, solution: e.solution, type: e.type })),
-    reviews: (t.reviews || []).map(r => ({ content: r.content, study_tips: r.study_tips })),
-  })));
+  const rawUnits = (s.units || []).map(u => ({
+    name: u.name,
+    description: u.description || "",
+    topics: (u.topics || []).map(t => ({
+      name: t.name,
+      content_summary: t.content_summary || t.description || "",
+      description: t.description || "",
+      objectives: tryParse(t.objectives),
+      concepts: (t.concepts || []).map(c => ({ name: c.name, definition: c.definition })),
+      questions: (t.questions || []).map(q => ({
+        type: q.type,
+        question_text: q.question_text,
+        options: tryParse(q.options),
+        correct_answer: q.correct_answer,
+        explanation: q.explanation,
+      })),
+      flashcards: (t.flashcards || []).map(f => ({ front: f.front, back: f.back, difficulty: f.difficulty })),
+      exercises: (t.exercises || []).map(e => ({ statement: e.statement, solution: e.solution, type: e.type })),
+      reviews: (t.reviews || []).map(r => ({ content: r.content, study_tips: r.study_tips })),
+    }))
+  }));
 
-  /* Mapear a formato frontend */
-  const topics = units.map(u => u.nombre);
-  const resumenes = units.flatMap(u => (u.summaries || []).map(s => ({ tema: u.nombre, contenido: s.content })));
-  const repasos = units.flatMap(u => (u.reviews || []).map(r => ({ tema: u.nombre, contenido: r.content })));
-  const tests = units.filter(u => u.questions?.length).map(u => ({
-    tema: u.nombre,
-    preguntas: u.questions.map(q => ({
+  const topics = rawUnits.flatMap(u => u.topics.map(t => t.name));
+  const resumenes = rawUnits.flatMap(u => u.topics.map(t => ({ tema: t.name, contenido: t.content_summary || t.description || "" })));
+  const repasos = rawUnits.flatMap(u => u.topics.flatMap(t => (t.reviews || []).map(r => ({ tema: t.name, contenido: r.content }))));
+  const tests = rawUnits.flatMap(u => u.topics.filter(t => t.questions?.length).map(t => ({
+    tema: t.name,
+    preguntas: t.questions.map(q => ({
       pregunta: q.question_text,
+      options: q.options || [],
       opciones: q.options || [],
       respuesta: q.options ? q.options.indexOf(q.correct_answer) : 0,
+      correct_answer: q.correct_answer,
       explicacion: q.explanation || "",
     })),
-  }));
-  const ejercicios = units.flatMap(u => (u.exercises || []).map(e => ({
-    enunciado: e.statement,
-    solucion: e.solution,
   })));
-  const flashcards = units.flatMap(u => u.flashcards || []);
+  const ejercicios = rawUnits.flatMap(u => u.topics.flatMap(t => (t.exercises || []).map(e => ({
+    enunciado: e.statement, statement: e.statement, solucion: e.solution, solution: e.solution,
+  }))));
+  const flashcards = rawUnits.flatMap(u => u.topics.flatMap(t => t.flashcards || []));
 
   return {
     id: s.id,
     nombre: s.name,
     descripcion: s.description || "",
-    resumen: resumenes.length ? resumenes.map(r => r.contenido).join("\n\n") : `Asignatura: ${s.name}`,
+    resumen: resumenes.length ? resumenes.slice(0, 3).map(r => r.contenido).join(" | ") : `Asignatura: ${s.name}`,
     temas: topics,
     repasos,
     tests,
@@ -198,9 +202,10 @@ function mapBackendSubject(s) {
     resumenes,
     flashcards,
     ia: "ollama",
-    iaRazon: "Procesado con Ollama local (IA sin conexión a internet)",
+    iaRazon: "Procesado con Ollama local (IA sin conexion a internet)",
     pendienteAnalisis: false,
     documents: s.documents || [],
+    _rawUnits: rawUnits,
   };
 }
 
@@ -456,230 +461,372 @@ function deleteSubject(id) {
 }
 
 /* =========================================================
-   DETALLE / LANDING DE ASIGNATURA
+   DETALLE / LANDING DE ASIGNATURA — VISTA COMPLETA
    ========================================================= */
 function openDetail(id) {
   const s = allSubjects().find(x => x.id === id);
   if (!s) return;
   const analyzed = !!s.temas?.length;
 
-  byId("detail-content").innerHTML = `
-    <div class="modal-head">
-      <div>
-        <h3>${esc(s.nombre)}</h3>
-        <div class="detail-badges">
-          ${analyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge pending-badge">Sin analizar</span>`}
-          <span class="status-tag ${analyzed ? "ok" : "pending"}">${analyzed ? "Analizada" : "Pendiente"}</span>
-        </div>
-      </div>
-      <button class="icon-btn" data-close aria-label="Cerrar">${svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>')}</button>
-    </div>
+  /* Guardar ID actual para navegacion */
+  window._currentDetailId = id;
 
-    ${analyzed ? `
-    <div class="detail-tabs" id="detail-tabs">
-      <button class="detail-tab active" data-tab="resumen">${I.book} Resumen</button>
-      <button class="detail-tab" data-tab="plan">${I.list} Plan Tematico</button>
-      <button class="detail-tab" data-tab="repasos">${I.file} Repasos</button>
-      <button class="detail-tab" data-tab="tests">${I.quiz} Tests</button>
-      <button class="detail-tab" data-tab="ejercicios">${I.edit} Ejercicios</button>
-      ${s.flashcards?.length ? `<button class="detail-tab" data-tab="flashcards">${I.zap} Flashcards</button>` : ""}
-    </div>
+  /* Switch to detail view */
+  document.querySelectorAll(".nav-item[data-view]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  byId("view-detail").classList.add("active");
+  byId("view-title").textContent = s.nombre;
+  byId("view-subtitle").textContent = analyzed ? `${s.temas?.length || 0} temas · ${s.tests?.length || 0} tests` : "Pendiente de analisis";
 
-    <div class="detail-tab-content" id="detail-tab-content">
-      ${renderDetailTab("resumen", s)}
-    </div>
-
-    <div class="detail-section" style="margin-top:18px">
-      <h4>IA utilizada</h4>
-      <div class="ia-reason">${esc(s.iaRazon || "No determinada.")}</div>
-    </div>
-    ` : `
-    <div class="detail-section">
-      <p class="muted">Esta asignatura aun no ha sido analizada. Sube sus PDFs en el Panel para generar el contenido automaticamente.</p>
-    </div>
-    `}
-  `;
-
-  byId("modal-detail").classList.add("open");
-  const root = byId("detail-content");
-
-  root.querySelector("[data-close]").addEventListener("click", closeModals);
-
-  if (analyzed) {
-    root.querySelectorAll(".detail-tab").forEach(tab =>
-      tab.addEventListener("click", () => {
-        root.querySelectorAll(".detail-tab").forEach(t => t.classList.remove("active"));
-        tab.classList.add("active");
-        byId("detail-tab-content").innerHTML = renderDetailTab(tab.dataset.tab, s);
-        bindTabContentEvents(s);
-      })
-    );
-    bindTabContentEvents(s);
-  }
+  renderDetailView(s);
 }
 
-function renderDetailTab(tab, s) {
-  switch (tab) {
-    case "resumen":
-      return `<div class="detail-section">
-        <p class="detail-text">${esc(s.resumen || "Sin resumen.")}</p>
-        ${s.temas?.length ? `<div class="topics">${s.temas.map(t => `<span class="topic">${esc(typeof t === "string" ? t : t.nombre)}</span>`).join("")}</div>` : ""}
+function renderDetailView(s) {
+  const analyzed = !!s.temas?.length;
+  const header = byId("detail-header");
+  const toc = byId("detail-toc");
+  const content = byId("detail-content-scroll");
+
+  /* Header */
+  header.innerHTML = `
+    <button class="btn btn-ghost detail-back" id="btn-detail-back">
+      ${I.back} Volver a Asignaturas
+    </button>
+    <div class="detail-title-row">
+      <h2>${esc(s.nombre)}</h2>
+      <div class="detail-badges">
+        ${analyzed ? `<span class="ai-badge ${s.ia}">${iaLabel(s.ia)}</span>` : `<span class="ai-badge pending-badge">Sin analizar</span>`}
+        <span class="status-tag ${analyzed ? "ok" : "pending"}">${analyzed ? "Analizada" : "Pendiente"}</span>
+      </div>
+    </div>
+    ${s.resumen ? `<p class="detail-resumen-text">${esc(s.resumen).substring(0, 300)}</p>` : ""}
+  `;
+
+  byId("btn-detail-back").addEventListener("click", () => switchView("asignaturas"));
+
+  if (!analyzed) {
+    toc.innerHTML = "";
+    content.innerHTML = `
+      <div class="detail-empty">
+        <div class="empty-icon">${I.book}</div>
+        <p class="empty-title">Sin contenido aun</p>
+        <p class="muted">Sube el PDF de esta asignatura en el Panel para generar el plan de estudio automaticamente.</p>
+        <button class="btn btn-primary" onclick="switchView('panel')">Ir al Panel</button>
       </div>`;
+    return;
+  }
+
+  /* Agrupar temas por unidad (si hay unidades) */
+  const units = groupTopicsByUnit(s);
+
+  /* Construir indice (TOC) */
+  let tocHtml = `<h4>Indice</h4><ul class="toc-list">`;
+  units.forEach((unit, ui) => {
+    tocHtml += `<li class="toc-unit"><a href="#unit-${ui}" class="toc-link">${esc(unit.name)}</a>`;
+    if (unit.topics.length > 0) {
+      tocHtml += `<ul>`;
+      unit.topics.forEach((t, ti) => {
+        tocHtml += `<li><a href="#topic-${ui}-${ti}" class="toc-link toc-sub">${esc(t.nombre)}</a></li>`;
+      });
+      tocHtml += `</ul>`;
+    }
+    tocHtml += `</li>`;
+  });
+  tocHtml += `</ul>`;
+  toc.innerHTML = tocHtml;
+
+  /* Construir contenido */
+  let contentHtml = "";
+
+  /* Tabs superiores */
+  contentHtml += `
+    <div class="detail-view-tabs" id="detail-view-tabs">
+      <button class="dtab active" data-dtab="resumenes">Resumenes</button>
+      <button class="dtab" data-dtab="plan">Plan Completo</button>
+      <button class="dtab" data-dtab="tests">Tests</button>
+      <button class="dtab" data-dtab="ejercicios">Ejercicios</button>
+      ${s.flashcards?.length ? `<button class="dtab" data-dtab="flashcards">Flashcards</button>` : ""}
+      <button class="dtab" data-dtab="repasos">Repasos</button>
+    </div>
+    <div id="detail-view-content"></div>`;
+
+  content.innerHTML = contentHtml;
+
+  /* Renderizar tab inicial (resumenes) */
+  renderDetailTab("resumenes", s, units);
+
+  /* Bind tabs */
+  content.querySelectorAll(".dtab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      content.querySelectorAll(".dtab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      renderDetailTab(tab.dataset.dtab, s, units);
+      /* Scroll to top of content */
+      content.scrollTop = 0;
+    });
+  });
+
+  /* Bind TOC links - scroll suave */
+  toc.querySelectorAll(".toc-link").forEach(link => {
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      const target = content.querySelector(link.getAttribute("href"));
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
+function groupTopicsByUnit(s) {
+  /* Si el backend ya tiene unidades agrupadas, usarlas */
+  if (s._rawUnits && s._rawUnits.length > 0) {
+    return s._rawUnits.map(u => ({
+      name: u.name,
+      description: u.description || "",
+      topics: (u.topics || []).map(t => ({
+        nombre: t.name,
+        contenido: t.content_summary || t.description || "",
+        summary: t.content_summary || "",
+        objectives: tryParse(t.objectives) || [],
+        questions: (t.questions || []).map(q => ({
+          type: q.type, question_text: q.question_text,
+          options: tryParse(q.options), correct_answer: q.correct_answer, explanation: q.explanation,
+        })),
+        flashcards: (t.flashcards || []).map(f => ({ front: f.front, back: f.back, difficulty: f.difficulty })),
+        exercises: (t.exercises || []).map(e => ({ statement: e.statement, solution: e.solution, type: e.type })),
+        reviews: (t.reviews || []).map(r => ({ content: r.content, study_tips: r.study_tips })),
+      }))
+    }));
+  }
+
+  /* Fallback: agrupar topics planos en unidades de ~5 */
+  const topicsPerUnit = 5;
+  const units = [];
+  const allTopics = (s.temas || []).map((t, i) => {
+    if (typeof t === "string") return { nombre: t, contenido: "", questions: [], flashcards: [], exercises: [], reviews: [] };
+    return t;
+  });
+
+  for (let i = 0; i < allTopics.length; i += topicsPerUnit) {
+    const chunk = allTopics.slice(i, i + topicsPerUnit);
+    units.push({
+      name: `Seccion ${Math.floor(i / topicsPerUnit) + 1}`,
+      description: `${chunk.length} temas`,
+      topics: chunk,
+    });
+  }
+  return units.length > 0 ? units : [{ name: "Contenido", description: "", topics: allTopics }];
+}
+
+function renderDetailTab(tab, s, units) {
+  const container = byId("detail-view-content");
+  if (!container) return;
+
+  switch (tab) {
+    case "resumenes":
+      container.innerHTML = units.map((unit, ui) => `
+        <div class="unit-section" id="unit-${ui}">
+          <h3 class="unit-title">${esc(unit.name)}</h3>
+          ${unit.description ? `<p class="unit-desc">${esc(unit.description)}</p>` : ""}
+          ${unit.topics.map((topic, ti) => `
+            <div class="topic-card" id="topic-${ui}-${ti}">
+              <h4 class="topic-title">${esc(topic.nombre)}</h4>
+              <div class="topic-summary">
+                ${renderTopicSummary(topic, s)}
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      `).join("");
+      break;
 
     case "plan":
-      return `<div class="detail-section">
-        ${s.temas?.length
-          ? `<ol class="plan-list">${s.temas.map((t, i) => {
-              const name = typeof t === "string" ? t : t.nombre;
-              const content = typeof t === "object" ? t.contenido : "";
-              return `<li class="plan-item">
-                <strong>${esc(name)}</strong>
-                ${content ? `<p class="muted">${esc(content)}</p>` : ""}
-              </li>`;
-            }).join("")}</ol>`
-          : `<p class="muted">No se detectaron temas.</p>`}
-      </div>`;
-
-    case "repasos":
-      return `<div class="detail-section">
-        ${s.repasos?.length
-          ? s.repasos.map(r => `
-            <div class="review-card">
-              <h5>${esc(r.tema)}</h5>
-              <div class="review-content">${esc(r.contenido).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>")}</div>
-            </div>`).join("")
-          : `<p class="muted">No hay repasos generados.</p>`}
-      </div>`;
+      container.innerHTML = units.map((unit, ui) => `
+        <div class="unit-section" id="unit-${ui}">
+          <h3 class="unit-title">${esc(unit.name)}</h3>
+          <ol class="plan-full-list">
+            ${unit.topics.map(t => `
+              <li class="plan-full-item">
+                <strong>${esc(t.nombre)}</strong>
+                ${t.contenido ? `<p class="muted">${esc(t.contenido)}</p>` : ""}
+                ${t.objectives?.length ? `<div class="topic-obj">${t.objectives.map(o => `<span class="obj-tag">${esc(o)}</span>`).join("")}</div>` : ""}
+              </li>
+            `).join("")}
+          </ol>
+        </div>
+      `).join("");
+      break;
 
     case "tests": {
       const savedScores = testScores[s.id] || {};
-      return `<div class="detail-section">
-        ${s.tests?.length
-          ? `<div id="test-container">${s.tests.map((_, i) => renderTest(s, i, savedScores)).join("")}</div>`
-          : `<p class="muted">No hay tests generados.</p>`}
-      </div>`;
+      let testIdx = 0;
+      container.innerHTML = units.map((unit, ui) => {
+        const unitTests = unit.topics.filter(t => t.questions?.length);
+        if (!unitTests.length) return "";
+        return `
+          <div class="unit-section" id="unit-${ui}">
+            <h3 class="unit-title">${esc(unit.name)}</h3>
+            ${unitTests.map(topic => {
+              const currentIdx = testIdx++;
+              return `
+                <div class="test-full-card" data-test="${currentIdx}">
+                  <h4 class="test-topic-name">${esc(topic.nombre)}</h4>
+                  ${topic.questions.map((q, qi) => `
+                    <div class="test-question-full">
+                      <p class="test-q-text"><strong>${qi + 1}.</strong> ${esc(q.question_text)}</p>
+                      <div class="test-options-full">
+                        ${(q.options || []).map((op, oi) => `
+                          <label class="test-option-full" data-q="${currentIdx}-${qi}" data-o="${oi}">
+                            <input type="radio" name="t${currentIdx}_q${qi}" value="${oi}">
+                            <span>${esc(op)}</span>
+                          </label>
+                        `).join("")}
+                      </div>
+                    </div>
+                  `).join("")}
+                  <button class="btn btn-primary btn-small btn-check-full-test" data-test="${currentIdx}" data-unit="${ui}">Verificar</button>
+                  <div class="test-result-full" id="test-result-full-${currentIdx}"></div>
+                </div>`;
+            }).join("")}
+          </div>`;
+      }).join("");
+
+      /* Bind test verification */
+      container.querySelectorAll(".btn-check-full-test").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const testEl = btn.closest(".test-full-card");
+          const allQuestions = testEl.querySelectorAll(".test-question-full");
+          let correct = 0;
+          let total = allQuestions.length;
+
+          allQuestions.forEach((qEl, qi) => {
+            const selected = qEl.querySelector("input:checked");
+            const options = qEl.querySelectorAll(".test-option-full");
+            /* Find the correct answer from the topic data */
+            let topicData = null;
+            for (const u of units) {
+              for (const t of u.topics) {
+                if (t.questions?.[qi]) { topicData = t; break; }
+              }
+            }
+            const correctAnswer = topicData?.questions?.[qi]?.correct_answer || "";
+            options.forEach(opt => {
+              opt.classList.remove("test-correct", "test-wrong");
+              const opText = opt.querySelector("span")?.textContent || "";
+              if (opText === correctAnswer) opt.classList.add("test-correct");
+              if (selected && +selected.value === +opt.dataset.o && opText !== correctAnswer) opt.classList.add("test-wrong");
+            });
+            if (selected) {
+              const selectedText = options[+selected.value]?.querySelector("span")?.textContent || "";
+              if (selectedText === correctAnswer) correct++;
+            }
+          });
+
+          const pct = Math.round((correct / total) * 100);
+          const resultEl = byId("test-result-full-" + btn.dataset.test);
+          resultEl.innerHTML = `
+            <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
+              ${correct}/${total} correctas (${pct}%) ${pct >= 70 ? " - Aprobado" : " - Necesitas repasar"}
+            </div>`;
+        });
+      });
+      break;
     }
 
     case "ejercicios":
-      return `<div class="detail-section">
-        ${s.ejercicios?.length
-          ? s.ejercicios.map((ex, i) => `
-            <div class="exercise-card">
-              <h5>Ejercicio ${i + 1}</h5>
-              <p class="exercise-stmt">${esc(ex.enunciado || ex.statement || "")}</p>
-              <button class="btn btn-ghost btn-small btn-show-solution" data-idx="${i}">Ver solucion</button>
-              <div class="exercise-solution" id="sol-${i}" hidden>
-                <p>${esc(ex.solucion || ex.solution || "").replace(/\n/g, "<br>")}</p>
+      container.innerHTML = units.map((unit, ui) => {
+        const allEx = unit.topics.flatMap(t => (t.exercises || []).map(e => ({ ...e, topic: t.nombre })));
+        if (!allEx.length) return "";
+        return `
+          <div class="unit-section" id="unit-${ui}">
+            <h3 class="unit-title">${esc(unit.name)}</h3>
+            ${allEx.map((ex, i) => `
+              <div class="exercise-full-card">
+                <span class="ex-topic-tag">${esc(ex.topic)}</span>
+                <h5>Ejercicio ${i + 1}</h5>
+                <p class="exercise-stmt-full">${esc(ex.statement || "")}</p>
+                <button class="btn btn-ghost btn-small btn-show-ex-sol" data-ex="${ui}-${i}">Ver solucion</button>
+                <div class="exercise-sol-full" id="ex-sol-${ui}-${i}" hidden>
+                  <p>${esc(ex.solution || "").replace(/\n/g, "<br>")}</p>
+                </div>
               </div>
-            </div>`).join("")
-          : `<p class="muted">No hay ejercicios generados.</p>`}
-      </div>`;
+            `).join("")}
+          </div>`;
+      }).join("");
 
-    case "flashcards":
-      return `<div class="detail-section">
-        ${s.flashcards?.length
-          ? `<div class="flashcards-grid">${s.flashcards.map((f, i) => `
-            <div class="flashcard" data-idx="${i}">
-              <div class="flashcard-front">${esc(f.front || "")}</div>
-              <div class="flashcard-back" hidden>${esc(f.back || "")}</div>
-              <button class="btn btn-ghost btn-small btn-flip-card" data-idx="${i}">Voltear</button>
-            </div>`).join("")}</div>`
-          : `<p class="muted">No hay flashcards generadas.</p>`}
-      </div>`;
+      container.querySelectorAll(".btn-show-ex-sol").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const sol = byId("ex-sol-" + btn.dataset.ex);
+          sol.hidden = !sol.hidden;
+          btn.textContent = sol.hidden ? "Ver solucion" : "Ocultar";
+        });
+      });
+      break;
 
-    default:
-      return "";
+    case "flashcards": {
+      const allFC = units.flatMap(u => u.topics.flatMap(t => (t.flashcards || []).map(f => ({ ...f, topic: t.nombre }))));
+      container.innerHTML = `
+        <div class="flashcards-full-grid">
+          ${allFC.map((f, i) => `
+            <div class="flashcard-full" data-fc="${i}">
+              <div class="fc-front">${esc(f.front || "")}</div>
+              <div class="fc-back" hidden>${esc(f.back || "")}</div>
+              <div class="fc-topic">${esc(f.topic)}</div>
+              <button class="btn btn-ghost btn-small btn-flip-full" data-fc="${i}">Voltear</button>
+            </div>
+          `).join("")}
+        </div>`;
+
+      container.querySelectorAll(".btn-flip-full").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const card = btn.closest(".flashcard-full");
+          const back = card.querySelector(".fc-back");
+          back.hidden = !back.hidden;
+          btn.textContent = back.hidden ? "Voltear" : "Ocultar";
+        });
+      });
+      break;
+    }
+
+    case "repasos":
+      container.innerHTML = units.map((unit, ui) => {
+        const allRev = unit.topics.flatMap(t => (t.reviews || []).map(r => ({ ...r, topic: t.nombre })));
+        if (!allRev.length) return "";
+        return `
+          <div class="unit-section" id="unit-${ui}">
+            <h3 class="unit-title">${esc(unit.name)}</h3>
+            ${allRev.map(r => `
+              <div class="review-full-card">
+                <h5>${esc(r.topic)}</h5>
+                <div class="review-full-content">${esc(r.content || "").replace(/\n/g, "<br>")}</div>
+                ${r.study_tips ? `<div class="review-tips"><strong>Consejos:</strong> ${esc(r.study_tips)}</div>` : ""}
+              </div>
+            `).join("")}
+          </div>`;
+      }).join("");
+      break;
   }
 }
 
-function renderTest(s, testIdx, savedScores) {
-  const test = s.tests[testIdx];
-  if (!test) return "";
-  const scoreKey = `${s.id}_test${testIdx}`;
-  const prev = savedScores[testIdx];
-
-  let questionsHtml = test.preguntas.map((pq, qi) => `
-    <div class="test-question">
-      <p><strong>${qi + 1}.</strong> ${esc(pq.pregunta)}</p>
-      <div class="test-options">
-        ${pq.opciones.map((op, oi) => `
-          <label class="test-option" data-q="${qi}" data-o="${oi}">
-            <input type="radio" name="q${testIdx}_${qi}" value="${oi}">
-            <span>${esc(op)}</span>
-          </label>`).join("")}
-      </div>
-    </div>`).join("");
-
-  let resultHtml = "";
-  if (prev) {
-    const pct = Math.round((prev.correct / prev.total) * 100);
-    resultHtml = `
-      <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
-        ${prev.correct}/${prev.total} correctas (${pct}%)
-        ${pct >= 70 ? " — Aprobado" : " — Necesitas repasar"}
-        <span style="opacity:.5;margin-left:8px;font-size:11px">(guardado)</span>
-      </div>`;
+function renderTopicSummary(topic, s) {
+  /* Si tiene resumen del backend, usarlo */
+  if (topic.summary) {
+    return `<p class="summary-text">${esc(topic.summary).replace(/\n/g, "<br>")}</p>`;
+  }
+  if (topic.contenido) {
+    return `<p class="summary-text">${esc(topic.contenido).replace(/\n/g, "<br>")}</p>`;
   }
 
-  return `
-    <div class="test-card" data-test="${testIdx}">
-      <h5>Test ${testIdx + 1}: ${esc(test.tema)}</h5>
-      ${questionsHtml}
-      <button class="btn btn-primary btn-small btn-check-test" data-test="${testIdx}">Verificar respuestas</button>
-      <div class="test-result" id="test-result-${testIdx}">${resultHtml}</div>
-    </div>`;
+  /* Fallback: buscar en resumenes del subject */
+  const resumen = (s.resumenes || []).find(r => r.tema === topic.nombre);
+  if (resumen) {
+    return `<p class="summary-text">${esc(resumen.contenido).replace(/\n/g, "<br>")}</p>`;
+  }
+
+  return `<p class="summary-text muted">Tema del plan de estudios.</p>`;
 }
 
 function bindTabContentEvents(s) {
-  byId("detail-content").querySelectorAll(".btn-show-solution").forEach(btn =>
-    btn.addEventListener("click", () => {
-      const sol = byId("sol-" + btn.dataset.idx);
-      sol.hidden = !sol.hidden;
-      btn.textContent = sol.hidden ? "Ver solucion" : "Ocultar solucion";
-    })
-  );
-
-  byId("detail-content").querySelectorAll(".btn-check-test").forEach(btn =>
-    btn.addEventListener("click", () => {
-      const testIdx = +btn.dataset.test;
-      const test = s.tests[testIdx];
-      let correct = 0;
-      test.preguntas.forEach((pq, qi) => {
-        const selected = byId("detail-content").querySelector(`input[name="q${testIdx}_${qi}"]:checked`);
-        const options = byId("detail-content").querySelectorAll(`[data-q="${qi}"]`);
-        options.forEach((opt, oi) => {
-          opt.classList.remove("test-correct", "test-wrong");
-          if (oi === pq.respuesta) opt.classList.add("test-correct");
-          if (selected && +selected.value === oi && oi !== pq.respuesta) opt.classList.add("test-wrong");
-        });
-        if (selected && +selected.value === pq.respuesta) correct++;
-      });
-
-      const result = byId("test-result-" + testIdx);
-      const pct = Math.round((correct / test.preguntas.length) * 100);
-
-      if (!testScores[s.id]) testScores[s.id] = {};
-      testScores[s.id][testIdx] = { correct, total: test.preguntas.length, pct, date: Date.now() };
-      saveScores();
-
-      result.hidden = false;
-      result.innerHTML = `
-        <div class="test-score ${pct >= 70 ? "pass" : "fail"}">
-          ${correct}/${test.preguntas.length} correctas (${pct}%)
-          ${pct >= 70 ? " — Aprobado" : " — Necesitas repasar"}
-        </div>
-        ${test.preguntas.map((pq, qi) => pq.explicacion ? `<div class="test-explain"><strong>${qi + 1}.</strong> ${esc(pq.explicacion)}</div>` : "").join("")}`;
-    })
-  );
-
-  byId("detail-content").querySelectorAll(".btn-flip-card").forEach(btn =>
-    btn.addEventListener("click", () => {
-      const card = btn.closest(".flashcard");
-      const back = card.querySelector(".flashcard-back");
-      back.hidden = !back.hidden;
-      btn.textContent = back.hidden ? "Voltear" : "Ocultar";
-    })
-  );
+  /* Legacy function - detail view now handles its own events */
 }
 
 /* =========================================================
@@ -1284,10 +1431,11 @@ function switchView(v) {
   byId("view-" + v).classList.add("active");
   const titles = {
     panel: ["Panel", "Resumen de tu semestre"],
-    asignaturas: ["Asignaturas", `${allSubjects().length} registradas · toca una tarjeta para ver el detalle`],
+    asignaturas: ["Asignaturas", `${allSubjects().length} registradas - toca una tarjeta para ver el detalle`],
+    detail: [window._currentDetailId ? allSubjects().find(x => x.id === window._currentDetailId)?.nombre || "Detalle" : "Detalle", ""],
   };
-  byId("view-title").textContent = titles[v][0];
-  byId("view-subtitle").textContent = titles[v][1];
+  byId("view-title").textContent = titles[v]?.[0] || v;
+  byId("view-subtitle").textContent = titles[v]?.[1] || "";
 }
 
 init();

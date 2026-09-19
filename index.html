@@ -124,7 +124,7 @@
       <div class="toolbar">
         <div class="search-box">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input type="text" id="search-input" placeholder="Buscar asignatura…">
+          <input type="text" id="search-input" placeholder="Buscar asignatura...">
         </div>
         <div class="filters" role="group" aria-label="Filtrar por estado">
           <button class="filter-chip active" data-filter="all">Todas</button>
@@ -135,6 +135,14 @@
       <div class="subjects-grid" id="subjects-grid"></div>
     </section>
 
+    <!-- ===== VISTA: DETALLE DE ASIGNATURA (pagina completa) ===== -->
+    <section id="view-detail" class="view detail-view">
+      <div class="detail-header" id="detail-header"></div>
+      <div class="detail-body">
+        <nav class="detail-toc" id="detail-toc"></nav>
+        <div class="detail-content" id="detail-content-scroll"></div>
+      </div>
+    </section>
 
   </main>
 </div>

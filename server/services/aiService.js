@@ -248,13 +248,25 @@ function generateExercisesFromTopic(topicName, unitContext, activities) {
 
 function generateReviewFromTopic(topicName, unitContext, activities) {
   const sentences = unitContext.split(/[\.!\?\n]+/).map(s => s.trim()).filter(s => s.length > 15);
-  const points = sentences.slice(0, 5).map((s, i) => (i + 1) + '. ' + s.charAt(0).toUpperCase() + s.slice(1));
-  let tips = 'Repasa definiciones clave, haz resumenes propios y practica con ejercicios del libro de texto.';
+  
+  const points = sentences.slice(0, 6).map((s, i) => {
+    const clean = s.charAt(0).toUpperCase() + s.slice(1);
+    return (i + 1) + '. ' + clean;
+  });
+
+  let tips = 'Metodo de estudio para este tema:\n';
+  tips += '- Lee el contenido una vez sin notas\n';
+  tips += '- Intenta explicar el tema de memoria\n';
+  tips += '- Compara tu explicacion con el original\n';
+  tips += '- Haz ejercicios de autoevaluacion\n';
+  tips += '- Revisa conexiones con otros temas de la unidad';
+
   if (activities.length > 0) {
-    tips = 'Realiza: "' + activities[0] + '". Luego practica con al menos 2 ejercicios adicionales y verifica tus respuestas.';
+    tips += '\n\nActividad recomendada: ' + activities[0];
   }
+
   return {
-    content: 'Repaso de: ' + topicName + '\n\nPuntos clave:\n' + points.join('\n') + '\n\nMetodo de estudio: lee el contenido, intenta explicar de memoria, compara con el original, repite.',
+    content: 'Resumen de aprendizaje: ' + topicName + '\n\n' + points.join('\n'),
     study_tips: tips
   };
 }
