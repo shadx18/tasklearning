@@ -1412,8 +1412,69 @@ svg:not([width]) { width: 16px; height: 16px; }
   color: var(--text-2);
 }
 
-.summary-text {
+.summary-text { margin: 0; }
+
+.summary-main {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-2);
+  margin-bottom: 14px;
+}
+
+.summary-section {
+  margin-bottom: 12px;
+}
+
+.summary-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--purple);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.summary-objectives, .summary-points {
+  list-style: none;
+  padding: 0;
   margin: 0;
+}
+
+.summary-objectives li, .summary-points li {
+  padding: 4px 0 4px 16px;
+  position: relative;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.summary-objectives li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  color: var(--purple);
+}
+
+.summary-points li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--text-4);
+}
+
+.summary-tips {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: var(--purple-soft);
+  border-radius: var(--r-sm);
+  border-left: 3px solid var(--purple-dim);
+}
+
+.summary-tips p {
+  font-size: 12px;
+  color: var(--text-2);
+  margin: 0;
+  line-height: 1.5;
 }
 
 /* Plan completo */

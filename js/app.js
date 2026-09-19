@@ -598,14 +598,54 @@ function groupTopicsByUnit(s) {
     }));
   }
 
-  /* Fallback: agrupar topics planos en unidades de ~5 */
-  const topicsPerUnit = 5;
-  const units = [];
-  const allTopics = (s.temas || []).map((t, i) => {
-    if (typeof t === "string") return { nombre: t, contenido: "", questions: [], flashcards: [], exercises: [], reviews: [] };
-    return t;
+  /* Fallback: intentar reconstruir desde datos planos */
+  const resumenes = s.resumenes || [];
+  const tests = s.tests || [];
+  const ejercicios = s.ejercicios || [];
+  const repasos = s.repasos || [];
+  const flashcards = s.flashcards || [];
+
+  /* Agrupar por tema */
+  const topicMap = new Map();
+  const topicOrder = [];
+
+  (s.temas || []).forEach(t => {
+    const name = typeof t === "string" ? t : t.nombre;
+    if (!topicMap.has(name)) {
+      topicMap.set(name, {
+        nombre: name,
+        contenido: typeof t === "object" ? (t.contenido || t.summary || "") : "",
+        summary: typeof t === "object" ? (t.summary || t.contenido || "") : "",
+        objectives: typeof t === "object" ? (t.objectives || []) : [],
+        questions: typeof t === "object" ? (t.questions || []) : [],
+        flashcards: typeof t === "object" ? (t.flashcards || []) : [],
+        exercises: typeof t === "object" ? (t.exercises || []) : [],
+        reviews: typeof t === "object" ? (t.reviews || []) : [],
+      });
+      topicOrder.push(name);
+    }
   });
 
+  /* Enriquecer con datos de resumenes/tests/ejercicios */
+  resumenes.forEach(r => {
+    const t = topicMap.get(r.tema);
+    if (t && !t.summary) t.summary = r.contenido;
+    if (t && !t.contenido) t.contenido = r.contenido;
+  });
+  tests.forEach(test => {
+    const t = topicMap.get(test.tema);
+    if (t && !t.questions?.length) t.questions = test.preguntas || [];
+  });
+  repasos.forEach(r => {
+    const t = topicMap.get(r.tema);
+    if (t && !t.reviews?.length) t.reviews = [{ content: r.contenido, study_tips: "" }];
+  });
+
+  const allTopics = topicOrder.map(name => topicMap.get(name));
+
+  /* Dividir en unidades de ~5 topics */
+  const topicsPerUnit = 5;
+  const units = [];
   for (let i = 0; i < allTopics.length; i += topicsPerUnit) {
     const chunk = allTopics.slice(i, i + topicsPerUnit);
     units.push({
@@ -808,21 +848,47 @@ function renderDetailTab(tab, s, units) {
 }
 
 function renderTopicSummary(topic, s) {
-  /* Si tiene resumen del backend, usarlo */
-  if (topic.summary) {
-    return `<p class="summary-text">${esc(topic.summary).replace(/\n/g, "<br>")}</p>`;
-  }
-  if (topic.contenido) {
-    return `<p class="summary-text">${esc(topic.contenido).replace(/\n/g, "<br>")}</p>`;
+  let html = '';
+
+  /* Resumen principal */
+  if (topic.summary && topic.summary.length > 15) {
+    html += `<div class="summary-main">${esc(topic.summary).replace(/\n/g, "<br>")}</div>`;
   }
 
-  /* Fallback: buscar en resumenes del subject */
-  const resumen = (s.resumenes || []).find(r => r.tema === topic.nombre);
-  if (resumen) {
-    return `<p class="summary-text">${esc(resumen.contenido).replace(/\n/g, "<br>")}</p>`;
+  /* Objetivos de aprendizaje */
+  const objectives = topic.objectives || (typeof topic.objectives === 'string' ? tryParse(topic.objectives) : []);
+  if (objectives.length > 0) {
+    html += `<div class="summary-section">
+      <h5 class="summary-label">Que aprenderas</h5>
+      <ul class="summary-objectives">
+        ${objectives.map(o => `<li>${esc(o)}</li>`).join("")}
+      </ul>
+    </div>`;
   }
 
-  return `<p class="summary-text muted">Tema del plan de estudios.</p>`;
+  /* Puntos clave del contenido */
+  if (topic.contenido && topic.contenido !== topic.summary && topic.contenido.length > 10) {
+    const points = topic.contenido.split(/[\.!\?]+/).filter(s => s.trim().length > 10).slice(0, 3);
+    if (points.length > 0) {
+      html += `<div class="summary-section">
+        <h5 class="summary-label">Puntos clave</h5>
+        <ul class="summary-points">
+          ${points.map(p => `<li>${esc(p.trim())}</li>`).join("")}
+        </ul>
+      </div>`;
+    }
+  }
+
+  /* Consejos de estudio del review */
+  const review = (topic.reviews || [])[0];
+  if (review?.study_tips) {
+    html += `<div class="summary-tips">
+      <h5 class="summary-label">Consejo de estudio</h5>
+      <p>${esc(review.study_tips).split('\n').slice(0, 3).join('<br>')}</p>
+    </div>`;
+  }
+
+  return html || `<p class="summary-text muted">Tema del plan de estudios.</p>`;
 }
 
 function bindTabContentEvents(s) {

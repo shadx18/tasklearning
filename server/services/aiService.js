@@ -282,6 +282,67 @@ function parsePlanTematico(fullText) {
   const objGenMatch = fullText.match(/Objetivo general\s+([\s\S]*?)(?=Resultados de aprendizaje|3\.\s|Metodolog)/i);
   const objetivoGeneral = objGenMatch ? objGenMatch[1].trim() : '';
 
+  /* --- Funciones auxiliares de generacion de contenido --- */
+
+  function generateEducationalSummary(topicName, content, unitObjective, activities) {
+    if (!content || content.length < 10) return topicName + ' es un tema del plan de estudios.';
+    
+    const sentences = content.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 12);
+    
+    let summary = 'En este tema se estudia: ';
+    
+    if (sentences.length > 0) {
+      summary += sentences[0].charAt(0).toUpperCase() + sentences[0].slice(1);
+      if (!summary.endsWith('.')) summary += '.';
+    }
+    
+    if (sentences.length > 1) {
+      summary += ' ' + sentences[1].charAt(0).toUpperCase() + sentences[1].slice(1);
+      if (!summary.endsWith('.')) summary += '.';
+    }
+    
+    if (unitObjective && unitObjective.length > 20) {
+      summary += ' Este tema contribuye a: ' + unitObjective.substring(0, 150);
+      if (!summary.endsWith('.')) summary += '.';
+    }
+    
+    if (activities.length > 0) {
+      summary += ' Actividad recomendada: ' + activities[0] + '.';
+    }
+    
+    summary += ' Para aprender este tema, comienza por las definiciones基本icas, luego revisa los ejemplos y finalmente practica con ejercicios.';
+    
+    return summary.substring(0, 500);
+  }
+
+  function generateObjectives(topicName, content) {
+    const objectives = [];
+    objectives.push('Comprender los conceptos fundamentales de ' + topicName);
+    
+    if (content) {
+      const lower = content.toLowerCase();
+      if (lower.includes('aplicar') || lower.includes('implementar') || lower.includes('usar')) {
+        objectives.push('Aplicar ' + topicName + ' en problemas practicos');
+      }
+      if (lower.includes('comparar') || lower.includes('diferencia') || lower.includes('contrastar')) {
+        objectives.push('Comparar ' + topicName + ' con otros enfoques similares');
+      }
+      if (lower.includes('analizar') || lower.includes('evaluar') || lower.includes('critica')) {
+        objectives.push('Analizar y evaluar el uso de ' + topicName);
+      }
+      if (lower.includes('diseñar') || lower.includes('crear') || lower.includes('desarrollar')) {
+        objectives.push('Disenar soluciones usando ' + topicName);
+      }
+    }
+    
+    if (objectives.length < 3) {
+      objectives.push('Identificar las aplicaciones de ' + topicName + ' en Ingenieria Informatica');
+      objectives.push('Resolver ejercicios basicos de ' + topicName);
+    }
+    
+    return objectives.slice(0, 4);
+  }
+
   const unitPattern = /Unidad\s+(I{1,3}|IV|V|VI{0,3})\.\s+([^\n]+)/gi;
   let unitMatch;
   const unitPositions = [];
@@ -307,10 +368,11 @@ function parsePlanTematico(fullText) {
     const unit = { name: 'Unidad ' + up.num + ': ' + up.name, description: '', topics: [] };
 
     const hoursMatch = unitText.match(/Horas?\s*(?:sugeridas?)?\s*[:\s]*(\d+)/i);
-    if (hoursMatch) unit.description = hoursMatch[1] + ' horas sugeridas';
+    const hours = hoursMatch ? hoursMatch[1] : '';
 
     const objMatch = unitText.match(/Objetivo de la unidad\s+([\s\S]*?)(?=Temas y lecciones|Actividades|Laboratorio|$)/i);
-    if (objMatch) unit.description = objMatch[1].trim().substring(0, 200);
+    const unitObjective = objMatch ? objMatch[1].trim() : '';
+    unit.description = (hours ? hours + ' horas. ' : '') + unitObjective.substring(0, 200);
 
     const lessons = [];
     const lessonBlockMatch = unitText.match(/Temas y lecciones\s+([\s\S]*?)(?=Actividades pr|Laboratorio|Unidad\s|$)/i);
@@ -326,13 +388,13 @@ function parsePlanTematico(fullText) {
         if (lessonName.length < 4 || lessonName.match(/^(Contenido|Horas?|Hora|Lecci|Tema|Nombre)/i)) continue;
 
         const restLines = part.substring(headerMatch[0].length).split('\n').map(l => l.trim()).filter(l => l.length > 0);
-        const filteredLines = restLines.filter(l => !l.match(/^Horas?$/i) && !l.match(/^\d+$/) && !l.match(/^Lecci/i) && !l.match(/^Contenido/i));
+        const filteredLines = restLines.filter(l => !l.match(/^Horas?$/i) && !l.match(/^\d+$/) && !l.match(/^Lecci/i) && !l.match(/^Contenido/i) && !l.match(/^Hora\s/i));
 
         if (lessonName.length < 30 && filteredLines.length > 0 && filteredLines[0].length > 3 && filteredLines[0].charAt(0) === filteredLines[0].charAt(0).toLowerCase()) {
           lessonName = lessonName + ' ' + filteredLines.shift();
         }
 
-        const lessonContent = filteredLines.join(' ').substring(0, 400);
+        const lessonContent = filteredLines.filter(l => l.length > 5 && !l.match(/^\d+$/)).join(' ').substring(0, 300);
         lessons.push({ name: lessonName, content: lessonContent || lessonName });
       }
     }
@@ -344,8 +406,8 @@ function parsePlanTematico(fullText) {
         if (m && m[2].length > 5 && m[2].length < 150 && !m[2].match(/^(Contenido|Horas?|Hora|Lecci|Tema)/i)) {
           const contentIdx = fullText.indexOf(item.trim()) + item.length;
           const chunk = fullText.substring(contentIdx, contentIdx + 400);
-          const cLines = chunk.split('\n').filter(l => l.trim().length > 10 && !l.match(/^\d+\.\s/));
-          lessons.push({ name: m[2].trim(), content: cLines.slice(0, 3).join(' ').substring(0, 300) || m[2].trim() });
+          const cLines = chunk.split('\n').filter(l => l.trim().length > 10 && !l.match(/^\d+\.\s/) && !l.match(/^Hora/i));
+          lessons.push({ name: m[2].trim(), content: cLines.slice(0, 2).join(' ').substring(0, 200) || m[2].trim() });
         }
       }
     }
@@ -354,25 +416,23 @@ function parsePlanTematico(fullText) {
     const actMatch = unitText.match(/Actividades pr[aá]cticas\s+([\s\S]*?)(?=Unidad\s|Laboratorio\s|Horas?\s*$|$)/i);
     if (actMatch) {
       const actLines = actMatch[1].split('\n').map(l => cleanLine(l)).filter(l => l.length > 10 && !l.match(/^(Actividades|Laboratorio|Unidad)/i));
-      activities.push(...actLines.slice(0, 6));
+      activities.push(...actLines.slice(0, 4));
     }
 
     console.log('  Unidad', up.num, ':', lessons.length, 'lecciones,', activities.length, 'actividades');
 
-    const unitFullContext = unitText;
-
     for (const lesson of lessons) {
-      const ctx = lesson.content + '\n' + unitFullContext;
+      const summary = generateEducationalSummary(lesson.name, lesson.content, unitObjective, activities);
       unit.topics.push({
         name: lesson.name,
         description: lesson.content.substring(0, 200) || 'Tema de la unidad',
-        summary: lesson.content.substring(0, 300) || lesson.name,
-        objectives: ['Comprender ' + lesson.name, 'Aplicar ' + lesson.name + ' en contextos informaticos'],
+        summary: summary,
+        objectives: generateObjectives(lesson.name, lesson.content),
         concepts: [],
-        questions: generateQuestionsFromTopic(lesson.name, ctx, activities),
-        flashcards: generateFlashcardsFromTopic(lesson.name, ctx),
-        exercises: generateExercisesFromTopic(lesson.name, ctx, activities),
-        reviews: [generateReviewFromTopic(lesson.name, ctx, activities)]
+        questions: generateQuestionsFromTopic(lesson.name, lesson.content + '\n' + unitText, activities),
+        flashcards: generateFlashcardsFromTopic(lesson.name, lesson.content),
+        exercises: generateExercisesFromTopic(lesson.name, lesson.content, activities),
+        reviews: [generateReviewFromTopic(lesson.name, lesson.content, activities)]
       });
     }
 
