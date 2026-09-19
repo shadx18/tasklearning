@@ -6,9 +6,12 @@ let ollamaAvailable = null;
 async function checkOllama() {
   if (ollamaAvailable !== null) return ollamaAvailable;
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
     const res = await fetch((process.env.AI_BASE_URL || 'http://localhost:11434/v1') + '/models', {
-      signal: AbortSignal.timeout(3000)
+      signal: controller.signal
     });
+    clearTimeout(timer);
     ollamaAvailable = res.ok;
   } catch {
     ollamaAvailable = false;

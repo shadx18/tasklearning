@@ -89,7 +89,14 @@ async function processDocument(docId, jobId) {
   saveDB();
 
   console.log('[Worker] Enviando a IA para analisis...');
-  const analysis = await analyzeDocument(chunks, doc.name);
+  let analysis;
+  try {
+    analysis = await analyzeDocument(chunks, doc.name);
+    console.log('[Worker] Analisis completado:', (analysis.units || []).length, 'unidades');
+  } catch (err) {
+    console.error('[Worker] Error en analisis:', err.message);
+    throw err;
+  }
 
   /* Bug fix #1: Solo eliminar units de ESTE documento, no de toda la asignatura */
   const subjectId = doc.subject_id;

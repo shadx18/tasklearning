@@ -458,6 +458,11 @@ function deleteSubject(id) {
   saveScores();
   saveLocal(); renderAll();
   toast("Asignatura eliminada");
+
+  /* Si estamos viendo el detalle de esta asignatura, volver a la lista */
+  if (window._currentDetailId === id) {
+    switchView("asignaturas");
+  }
 }
 
 /* =========================================================
