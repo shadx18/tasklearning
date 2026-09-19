@@ -1,0 +1,23 @@
+{
+  "name": "tasklearning-server",
+  "version": "1.0.0",
+  "description": "Backend API para TaskLearning — Plataforma de estudio asistido por IA",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:init": "node db/init.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.0.0",
+    "pdf-parse": "^1.1.1",
+    "pdf2json": "^4.1.0",
+    "pdfjs-dist": "^3.11.174",
+    "sql.js": "^1.11.0",
+    "uuid": "^10.0.0"
+  }
+}

@@ -1,12 +1,14 @@
 /* =========================================================
-   TaskLearning v3.1 — Plataforma de análisis de asignaturas
-   Subes PDFs → plataforma genera plan, repasos, tests,
-   resúmenes y ejercicios automáticamente.
+   TaskLearning v4.0 — Plataforma de análisis con Backend
+   Subes PDFs → backend procesa con IA local (Ollama) →
+   genera plan, repasos, tests, resúmenes y ejercicios.
    ========================================================= */
 
 const LS_KEY = "tasklearning.subjects.v1";
 const LS_NOTICE = "tasklearning.notice.dismissed";
 const LS_SCORES = "tasklearning.scores.v1";
+const API_BASE = location.origin + "/api";
+let backendAvailable = false;
 let seedSubjects = [];
 let userSubjects = [];
 let testScores = {};
@@ -34,12 +36,13 @@ const I = {
   quiz:   svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>', 14),
   edit:   svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>', 14),
   back:   svg('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>', 16),
+  server: svg('<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>', 14),
 };
 
 /* ---------------- Utilidades ---------------- */
 function byId(id) { return document.getElementById(id); }
 function esc(t) { const d = document.createElement("div"); d.textContent = t ?? ""; return d.innerHTML; }
-function iaLabel(k) { return { kimi: "Kimi", chatgpt: "ChatGPT", claude: "Claude" }[k] || k; }
+function iaLabel(k) { return { kimi: "Kimi", chatgpt: "ChatGPT", claude: "Claude", ollama: "Ollama Local" }[k] || k; }
 function allSubjects() { return [...seedSubjects, ...userSubjects]; }
 
 function shuffle(arr) {
@@ -49,6 +52,160 @@ function shuffle(arr) {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+
+/* ---------------- Backend API helpers ---------------- */
+async function apiFetch(path, opts = {}) {
+  const url = API_BASE + path;
+  const res = await fetch(url, {
+    headers: { "Content-Type": "application/json", ...opts.headers },
+    ...opts,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
+async function checkBackend() {
+  try {
+    const data = await apiFetch("/health");
+    backendAvailable = data.status === "ok";
+  } catch {
+    backendAvailable = false;
+  }
+  updateBackendBadge();
+  return backendAvailable;
+}
+
+function updateBackendBadge() {
+  let badge = byId("backend-badge");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.id = "backend-badge";
+    badge.style.cssText = "font-size:11px;padding:3px 8px;border-radius:10px;margin-left:8px;font-weight:500;vertical-align:middle;";
+    const header = document.querySelector(".app-header h1") || document.querySelector("h1");
+    if (header) header.appendChild(badge);
+  }
+  if (backendAvailable) {
+    badge.style.background = "rgba(34,197,94,0.15)";
+    badge.style.color = "#22c55e";
+    badge.textContent = "Backend ON";
+  } else {
+    badge.style.background = "rgba(234,179,8,0.15)";
+    badge.style.color = "#eab308";
+    badge.textContent = "Offline (localStorage)";
+  }
+}
+
+async function uploadToBackend(files, subjectName) {
+  /* 1. Crear asignatura en backend */
+  const subject = await apiFetch("/subjects", {
+    method: "POST",
+    body: JSON.stringify({ name: subjectName, description: `Análisis de ${files.length} PDF(s)` }),
+  });
+
+  /* 2. Subir archivos */
+  const formData = new FormData();
+  formData.append("subject_id", subject.id);
+  files.forEach(f => formData.append("files", f));
+
+  const uploadRes = await fetch(`${API_BASE}/documents`, { method: "POST", body: formData });
+  if (!uploadRes.ok) throw new Error("Error subiendo archivos");
+  const uploadData = await uploadRes.json();
+
+  /* 3. Disparar procesamiento para cada documento */
+  for (const doc of uploadData.documents) {
+    await apiFetch(`/analysis/process/${doc.id}`, { method: "POST" });
+  }
+
+  return { subject, docs: uploadData.documents };
+}
+
+async function pollProcessingStatus(docId, onProgress) {
+  let attempts = 0;
+  const maxAttempts = 120; /* 2 minutos max */
+  while (attempts < maxAttempts) {
+    await new Promise(r => setTimeout(r, 1500));
+    attempts++;
+    try {
+      const data = await apiFetch(`/analysis/status/${docId}`);
+      const pct = Math.min(90, 30 + (attempts / maxAttempts) * 60);
+      onProgress(pct, `Procesando... (${data.document.status})`);
+
+      if (data.document.status === "COMPLETED") return data;
+      if (data.document.status === "FAILED") throw new Error(data.document.error_message || "Error procesando");
+    } catch (e) {
+      if (attempts > 5) throw e;
+    }
+  }
+  throw new Error("Timeout: el procesamiento tardó demasiado");
+}
+
+async function fetchSubjectFromBackend(subjectId) {
+  const data = await apiFetch(`/subjects/${subjectId}`);
+  return mapBackendSubject(data);
+}
+
+function mapBackendSubject(s) {
+  const units = (s.units || []).flatMap(u => (u.topics || []).map(t => ({
+    nombre: t.name,
+    contenido: t.content_summary || t.description || "",
+    objectives: tryParse(t.objectives),
+    concepts: (t.concepts || []).map(c => ({ name: c.name, definition: c.definition })),
+    summaries: (t.summaries || []).map(sm => ({ content: sm.content })),
+    questions: (t.questions || []).map(q => ({
+      type: q.type,
+      question_text: q.question_text,
+      options: tryParse(q.options),
+      correct_answer: q.correct_answer,
+      explanation: q.explanation,
+    })),
+    flashcards: (t.flashcards || []).map(f => ({ front: f.front, back: f.back, difficulty: f.difficulty })),
+    exercises: (t.exercises || []).map(e => ({ statement: e.statement, solution: e.solution, type: e.type })),
+    reviews: (t.reviews || []).map(r => ({ content: r.content, study_tips: r.study_tips })),
+  })));
+
+  /* Mapear a formato frontend */
+  const topics = units.map(u => u.nombre);
+  const resumenes = units.flatMap(u => (u.summaries || []).map(s => ({ tema: u.nombre, contenido: s.content })));
+  const repasos = units.flatMap(u => (u.reviews || []).map(r => ({ tema: u.nombre, contenido: r.content })));
+  const tests = units.filter(u => u.questions?.length).map(u => ({
+    tema: u.nombre,
+    preguntas: u.questions.map(q => ({
+      pregunta: q.question_text,
+      opciones: q.options || [],
+      respuesta: q.options ? q.options.indexOf(q.correct_answer) : 0,
+      explicacion: q.explanation || "",
+    })),
+  }));
+  const ejercicios = units.flatMap(u => (u.exercises || []).map(e => ({
+    enunciado: e.statement,
+    solucion: e.solution,
+  })));
+  const flashcards = units.flatMap(u => u.flashcards || []);
+
+  return {
+    id: s.id,
+    nombre: s.name,
+    descripcion: s.description || "",
+    resumen: resumenes.length ? resumenes.map(r => r.contenido).join("\n\n") : `Asignatura: ${s.name}`,
+    temas: topics,
+    repasos,
+    tests,
+    ejercicios,
+    resumenes,
+    flashcards,
+    ia: "ollama",
+    iaRazon: "Procesado con Ollama local (IA sin conexión a internet)",
+    pendienteAnalisis: false,
+    documents: s.documents || [],
+  };
+}
+
+function tryParse(s) {
+  try { return JSON.parse(s); } catch { return s; }
 }
 
 /* ---------------- Notificaciones toast ---------------- */
@@ -64,11 +221,49 @@ function toast(msg, type = "ok") {
 
 /* ---------------- Carga inicial ---------------- */
 async function init() {
+  /* Chequear backend */
+  await checkBackend();
+
+  /* Cargar subjects del backend o localStorage */
+  if (backendAvailable) {
+    try {
+      const apiSubjects = await apiFetch("/subjects");
+      userSubjects = apiSubjects.map(s => ({
+        id: s.id,
+        nombre: s.name,
+        descripcion: s.description || "",
+        resumen: "",
+        temas: [],
+        repasos: [],
+        tests: [],
+        ejercicios: [],
+        resumenes: [],
+        ia: null,
+        iaRazon: "",
+        pendienteAnalisis: true,
+      }));
+      /* Cargar detalle de cada subject */
+      for (const s of userSubjects) {
+        try {
+          const detail = await fetchSubjectFromBackend(s.id);
+          Object.assign(s, detail);
+        } catch (e) {
+          console.warn("Error cargando detalle de", s.nombre, e);
+        }
+      }
+    } catch (e) {
+      console.warn("Error cargando desde API, usando localStorage:", e);
+      userSubjects = loadLocal();
+    }
+  } else {
+    userSubjects = loadLocal();
+  }
+
   try {
     const res = await fetch("data/subjects.json");
     seedSubjects = (await res.json()).subjects || [];
   } catch { seedSubjects = []; }
-  userSubjects = loadLocal();
+
   testScores = loadScores();
   renderAll();
   bindEvents();
@@ -148,6 +343,7 @@ function renderStats() {
 function renderDistribution() {
   const all = allSubjects();
   const meta = {
+    ollama:  { label: "Ollama Local",  cls: "ollama",  use: "IA local, sin internet, privada", url: "#" },
     kimi:    { label: "Kimi Moderato", cls: "kimi",    use: "Proyectos de código, documentos largos", url: "https://kimi.moonshot.cn" },
     chatgpt: { label: "ChatGPT Free",  cls: "chatgpt", use: "Matemática, problemas paso a paso", url: "https://chat.openai.com" },
     claude:  { label: "Claude Free",   cls: "claude",  use: "Redacción académica, revisión de estilo", url: "https://claude.ai" },
@@ -165,7 +361,7 @@ function renderDistribution() {
       <div class="ai-use">${m.use}</div>
       ${subs.length
         ? `<div class="ai-subjects">${subs.map(s => `<a href="#" class="ai-subject" data-id="${s.id}">${esc(s.nombre)}</a>`).join("")}</div>`
-        : `<div class="ai-names">Sin asignaturas todavía</div>`}
+        : `<div class="ai-names">Sin asignaturas todavia</div>`}
     </div>`;
   }).join("");
 
@@ -188,7 +384,7 @@ function renderSubjects() {
   if (!allSubjects().length) {
     grid.innerHTML = `<div class="empty-state">
       <div class="empty-icon">${I.cap}</div>
-      <p class="empty-title">Todavía no hay asignaturas</p>
+      <p class="empty-title">Todavia no hay asignaturas</p>
       <p class="muted">Sube un PDF en el Panel para comenzar.</p>
       <button class="btn btn-primary" data-action="add">${I.plus} Agregar la primera</button>
     </div>`;
@@ -212,7 +408,7 @@ function renderSubjects() {
         <h3>${esc(s.nombre)}</h3>
         <span class="status-tag ${analyzed ? "ok" : "pending"}">${analyzed ? "Analizada" : "Pendiente"}</span>
       </div>
-      <p class="subject-desc">${esc(s.resumen || s.descripcion || "Sin descripción.")}</p>
+      <p class="subject-desc">${esc(s.resumen || s.descripcion || "Sin descripcion.")}</p>
       <div class="subject-meta">
         ${nTemas ? `<span>${I.book}${nTemas} tema${nTemas !== 1 ? "s" : ""}</span>` : ""}
         ${nTests ? `<span>${I.quiz}${nTests} test${nTests !== 1 ? "s" : ""}</span>` : ""}
@@ -229,7 +425,7 @@ function renderSubjects() {
   }).join("");
 }
 
-/* ---------------- Modal añadir/editar ---------------- */
+/* ---------------- Modal anyadir/editar ---------------- */
 function openSubjectModal(id = null) {
   editingId = id;
   const s = id ? userSubjects.find(x => x.id === id) : null;
@@ -245,7 +441,13 @@ function closeModals() { document.querySelectorAll(".modal-overlay").forEach(m =
 function deleteSubject(id) {
   const s = userSubjects.find(x => x.id === id);
   if (!s) return;
-  if (!confirm(`¿Eliminar "${s.nombre}"? Esta acción no se puede deshacer.`)) return;
+  if (!confirm(`¿Eliminar "${s.nombre}"? Esta accion no se puede deshacer.`)) return;
+
+  /* Eliminar del backend si esta disponible */
+  if (backendAvailable) {
+    apiFetch(`/subjects/${id}`, { method: "DELETE" }).catch(e => console.warn("Error eliminando del backend:", e));
+  }
+
   userSubjects = userSubjects.filter(x => x.id !== id);
   delete testScores[id];
   saveScores();
@@ -276,10 +478,11 @@ function openDetail(id) {
     ${analyzed ? `
     <div class="detail-tabs" id="detail-tabs">
       <button class="detail-tab active" data-tab="resumen">${I.book} Resumen</button>
-      <button class="detail-tab" data-tab="plan">${I.list} Plan Temático</button>
+      <button class="detail-tab" data-tab="plan">${I.list} Plan Tematico</button>
       <button class="detail-tab" data-tab="repasos">${I.file} Repasos</button>
       <button class="detail-tab" data-tab="tests">${I.quiz} Tests</button>
       <button class="detail-tab" data-tab="ejercicios">${I.edit} Ejercicios</button>
+      ${s.flashcards?.length ? `<button class="detail-tab" data-tab="flashcards">${I.zap} Flashcards</button>` : ""}
     </div>
 
     <div class="detail-tab-content" id="detail-tab-content">
@@ -287,12 +490,12 @@ function openDetail(id) {
     </div>
 
     <div class="detail-section" style="margin-top:18px">
-      <h4>IA sugerida para dudas</h4>
+      <h4>IA utilizada</h4>
       <div class="ia-reason">${esc(s.iaRazon || "No determinada.")}</div>
     </div>
     ` : `
     <div class="detail-section">
-      <p class="muted">Esta asignatura aún no ha sido analizada. Sube sus PDFs en el Panel para generar el contenido automáticamente.</p>
+      <p class="muted">Esta asignatura aun no ha sido analizada. Sube sus PDFs en el Panel para generar el contenido automaticamente.</p>
     </div>
     `}
   `;
@@ -363,13 +566,25 @@ function renderDetailTab(tab, s) {
           ? s.ejercicios.map((ex, i) => `
             <div class="exercise-card">
               <h5>Ejercicio ${i + 1}</h5>
-              <p class="exercise-stmt">${esc(ex.enunciado)}</p>
-              <button class="btn btn-ghost btn-small btn-show-solution" data-idx="${i}">Ver solución</button>
+              <p class="exercise-stmt">${esc(ex.enunciado || ex.statement || "")}</p>
+              <button class="btn btn-ghost btn-small btn-show-solution" data-idx="${i}">Ver solucion</button>
               <div class="exercise-solution" id="sol-${i}" hidden>
-                <p>${esc(ex.solucion).replace(/\n/g, "<br>")}</p>
+                <p>${esc(ex.solucion || ex.solution || "").replace(/\n/g, "<br>")}</p>
               </div>
             </div>`).join("")
           : `<p class="muted">No hay ejercicios generados.</p>`}
+      </div>`;
+
+    case "flashcards":
+      return `<div class="detail-section">
+        ${s.flashcards?.length
+          ? `<div class="flashcards-grid">${s.flashcards.map((f, i) => `
+            <div class="flashcard" data-idx="${i}">
+              <div class="flashcard-front">${esc(f.front || "")}</div>
+              <div class="flashcard-back" hidden>${esc(f.back || "")}</div>
+              <button class="btn btn-ghost btn-small btn-flip-card" data-idx="${i}">Voltear</button>
+            </div>`).join("")}</div>`
+          : `<p class="muted">No hay flashcards generadas.</p>`}
       </div>`;
 
     default:
@@ -420,7 +635,7 @@ function bindTabContentEvents(s) {
     btn.addEventListener("click", () => {
       const sol = byId("sol-" + btn.dataset.idx);
       sol.hidden = !sol.hidden;
-      btn.textContent = sol.hidden ? "Ver solución" : "Ocultar solución";
+      btn.textContent = sol.hidden ? "Ver solucion" : "Ocultar solucion";
     })
   );
 
@@ -456,6 +671,15 @@ function bindTabContentEvents(s) {
         ${test.preguntas.map((pq, qi) => pq.explicacion ? `<div class="test-explain"><strong>${qi + 1}.</strong> ${esc(pq.explicacion)}</div>` : "").join("")}`;
     })
   );
+
+  byId("detail-content").querySelectorAll(".btn-flip-card").forEach(btn =>
+    btn.addEventListener("click", () => {
+      const card = btn.closest(".flashcard");
+      const back = card.querySelector(".flashcard-back");
+      back.hidden = !back.hidden;
+      btn.textContent = back.hidden ? "Voltear" : "Ocultar";
+    })
+  );
 }
 
 /* =========================================================
@@ -469,7 +693,6 @@ function initAnalyzer() {
   const btn = byId("btn-analyze");
   const nameInput = byId("analyzer-name");
 
-  /* Activar/desactivar botón según haya archivos Y nombre */
   const updateBtnState = () => {
     btn.disabled = !analyzerFiles.length || !nameInput.value.trim();
   };
@@ -507,14 +730,152 @@ function renderAnalyzerFileList() {
   btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
 }
 
+function setProgress(pct, msg) {
+  byId("analyzer-progress").hidden = false;
+  byId("progress-fill").style.width = pct + "%";
+  byId("progress-text").textContent = msg;
+}
+
+/* =========================================================
+   EJECUCION DEL ANALISIS — Backend API o fallback local
+   ========================================================= */
+async function runAnalysis() {
+  const name = byId("analyzer-name").value.trim();
+  if (!name) { toast("Escribe el nombre de la asignatura", "error"); return; }
+  if (!analyzerFiles.length) { toast("Selecciona al menos un PDF", "error"); return; }
+
+  const btn = byId("btn-analyze");
+  btn.disabled = true;
+  const originalBtnHtml = btn.innerHTML;
+  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Analizando...`;
+
+  try {
+    if (backendAvailable) {
+      /* ===== MODO BACKEND ===== */
+      setProgress(10, "Conectando con el servidor...");
+      await new Promise(r => setTimeout(r, 200));
+
+      setProgress(20, "Subiendo PDFs al servidor...");
+      const { subject, docs } = await uploadToBackend(analyzerFiles, name);
+
+      setProgress(40, `Procesando ${docs.length} documento(s) con IA local...`);
+
+      /* Polling de estado para el primer documento */
+      if (docs.length > 0) {
+        await pollProcessingStatus(docs[0].id, (pct, msg) => setProgress(pct, msg));
+      }
+
+      setProgress(95, "Cargando resultados...");
+      const detail = await fetchSubjectFromBackend(subject.id);
+
+      /* Actualizar o crear subject local */
+      let localSubject = userSubjects.find(s => s.id === subject.id);
+      if (!localSubject) {
+        localSubject = { id: subject.id, nombre: subject.name, descripcion: `Analisis de ${analyzerFiles.length} PDF(s)` };
+        userSubjects.push(localSubject);
+      }
+      Object.assign(localSubject, detail);
+
+      saveLocal();
+      renderAll();
+
+      setProgress(100, "Completado.");
+      analyzerFiles = [];
+      renderAnalyzerFileList();
+      byId("analyzer-name").value = "";
+
+      const nTopics = detail.temas?.length || 0;
+      const nTests = detail.tests?.length || 0;
+      toast(`"${name}": ${nTopics} temas, ${nTests} tests — IA: Ollama Local`);
+      setTimeout(() => { byId("analyzer-progress").hidden = true; }, 1500);
+      openDetail(subject.id);
+
+    } else {
+      /* ===== MODO OFFLINE (fallback local, como antes) ===== */
+      let fullText = "";
+      for (let i = 0; i < analyzerFiles.length; i++) {
+        setProgress(((i + 1) / analyzerFiles.length) * 55, `Leyendo PDF ${i + 1}/${analyzerFiles.length}: ${analyzerFiles[i].name}`);
+        try {
+          const text = await extractPdfText(analyzerFiles[i]);
+          fullText += text + "\n\n";
+        } catch (pdfErr) {
+          console.error(`Error leyendo ${analyzerFiles[i].name}:`, pdfErr);
+          toast(`Error leyendo "${analyzerFiles[i].name}": ${pdfErr.message}`, "error");
+        }
+      }
+
+      if (!fullText.trim()) {
+        toast("No se pudo extraer texto de los PDFs.", "error");
+        return;
+      }
+
+      setProgress(60, "Analizando contenido (modo local)...");
+      await new Promise(r => setTimeout(r, 200));
+
+      let result;
+      try {
+        result = analyzeText(fullText, name);
+      } catch (analyzeErr) {
+        toast("Error al analizar: " + analyzeErr.message, "error");
+        return;
+      }
+
+      setProgress(80, "Generando tests y ejercicios...");
+      await new Promise(r => setTimeout(r, 200));
+
+      let subject = userSubjects.find(s => s.nombre.toLowerCase() === name.toLowerCase());
+      if (!subject) {
+        subject = { id: "u_" + Date.now(), nombre: name, descripcion: `Analisis de ${analyzerFiles.length} PDF(s)`, anno: "2", semestre: "" };
+        userSubjects.push(subject);
+      }
+
+      Object.assign(subject, {
+        resumen: result.resumen,
+        temas: result.topics,
+        repasos: result.repasos,
+        tests: result.tests,
+        ejercicios: result.ejercicios,
+        resumenes: result.resumenes,
+        ia: result.ia,
+        iaRazon: result.iaRazon,
+        pendienteAnalisis: false,
+      });
+
+      setProgress(92, "Guardando...");
+      await new Promise(r => setTimeout(r, 150));
+
+      saveLocal();
+      renderAll();
+
+      setProgress(100, "Completado.");
+      analyzerFiles = [];
+      renderAnalyzerFileList();
+      byId("analyzer-name").value = "";
+
+      const nTopics = result.topics.length;
+      const nTests = result.tests.length;
+      const nExercises = result.ejercicios.length;
+      toast(`"${name}": ${nTopics} temas, ${nTests} tests, ${nExercises} ejercicios — IA: ${iaLabel(result.ia)}`);
+      setTimeout(() => { byId("analyzer-progress").hidden = true; }, 1500);
+      openDetail(subject.id);
+    }
+  } catch (err) {
+    toast("Error inesperado: " + err.message, "error");
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalBtnHtml;
+    btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
+  }
+}
+
+/* ---------------- Fallback: extraccion PDF en cliente (solo modo offline) ---------------- */
 async function extractPdfText(file) {
-  /* Configurar worker solo una vez */
   if (!window._pdfWorkerReady) {
     try {
       pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
       window._pdfWorkerReady = true;
     } catch (e) {
-      /* Si falla el CDN, intentar sin worker (más lento pero funciona) */
       console.warn("PDF.js worker no disponible, usando modo sin worker");
     }
   }
@@ -527,8 +888,6 @@ async function extractPdfText(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-
-    /* Agrupar items por línea (misma Y position) para evitar palabras pegadas */
     const items = content.items;
     let lastY = null;
     let lineText = "";
@@ -536,7 +895,6 @@ async function extractPdfText(file) {
     for (const item of items) {
       const y = Math.round(item.transform[5]);
       if (lastY !== null && Math.abs(y - lastY) > 5) {
-        /* Nueva línea */
         text += lineText.trim() + "\n";
         lineText = "";
       }
@@ -548,66 +906,51 @@ async function extractPdfText(file) {
   return text;
 }
 
-function setProgress(pct, msg) {
-  byId("analyzer-progress").hidden = false;
-  byId("progress-fill").style.width = pct + "%";
-  byId("progress-text").textContent = msg;
-}
-
 /* =========================================================
-   ANÁLISIS DE CONTENIDO — genera todo automáticamente
+   ANALISIS LOCAL (fallback cuando no hay backend)
    ========================================================= */
 function analyzeText(fullText, subjectName) {
   const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 3);
   const lower = fullText.toLowerCase();
 
-  /* --- Detectar tipo de materia --- */
-  const mathKw = ["ecuación","integral","derivada","función","teorema","demostración","límite","serie","matriz","determinante","polinomio","raíz","cálculo","álgebra","estadística","probabilidad","combinatoria","proposicional","lógica","conjunto","relación","vector","espacio","transformada","factorial","recursión","congruencia","primo","divisibilidad"];
-  const progKw = ["código","programa","algoritmo","clase","método","objeto","array","lista","puntero","memoria","compilador","return","for","while","if","herencia","interface","tipo","dato","estructura","base de datos","sql","red","protocolo","función","recursión","complejidad","orden","pila","cola","árbol","grafo","hash","archivo","excepción","objeto","polimorfismo","encapsulamiento","abstracción"];
-  const redaccionKw = ["ensayo","párrafo","redacción","argumento","tesis","introducción","conclusión","bibliografía","cita","referencia","texto","lectura","comprensión","análisis","crítica","paradigma","teoría","concepto","definición","contexto","histórico","social","cultura","educación","filosofía"];
+  const mathKw = ["ecuacion","integral","derivada","funcion","teorema","demostracion","limite","serie","matriz","determinante","polinomio","raiz","calculo","algebra","estadistica","probabilidad","combinatoria","proposicional","logica","conjunto","relacion","vector","espacio","transformada","factorial","recursion","congruencia","primo","divisibilidad"];
+  const progKw = ["codigo","programa","algoritmo","clase","metodo","objeto","array","lista","puntero","memoria","compilador","return","for","while","if","herencia","interface","tipo","dato","estructura","base de datos","sql","red","protocolo","funcion","recursion","complejidad","orden","pila","cola","arbol","grafo","hash","archivo","excepcion","objeto","polimorfismo","encapsulamiento","abstraccion"];
+  const redaccionKw = ["ensayo","parrafo","redaccion","argumento","tesis","introduccion","conclusion","bibliografia","cita","referencia","texto","lectura","comprension","analisis","critica","paradigma","teoria","concepto","definicion","contexto","historico","social","cultura","educacion","filosofia"];
 
   const score = (kws) => kws.reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0);
   const scores = { math: score(mathKw), prog: score(progKw), redaccion: score(redaccionKw) };
   const maxScore = Math.max(1, ...Object.values(scores));
 
-  /* --- Detectar temas (mejorado) --- */
   let topics = detectTopics(lines, fullText);
-
-  /* --- Resumen inteligente --- */
   const resumen = generateIntelligentSummary(fullText, subjectName, scores);
 
-  /* --- Repasos --- */
   const repasos = topics.slice(0, 15).map(t => ({
     tema: t,
     contenido: generateReview(t, fullText, scores),
   }));
 
-  /* --- Tests (3-5 preguntas por tema, máximo 10 temas) --- */
   const tests = topics.slice(0, 10).map(t => ({
     tema: t,
     preguntas: generateQuestions(t, fullText, scores),
   })).filter(t => t.preguntas.length >= 3);
 
-  /* --- Ejercicios --- */
   const ejercicios = topics.slice(0, 10).map(t => generateExercise(t, fullText, scores)).filter(Boolean);
 
-  /* --- Resúmenes por tema --- */
   const resumenes = topics.slice(0, 15).map(t => ({
     tema: t,
     contenido: generateTopicSummary(t, fullText),
   }));
 
-  /* --- IA recomendada --- */
   let ia = "kimi", iaRazon = "";
   if (scores.math / maxScore > 0.35) {
     ia = "chatgpt";
-    iaRazon = "Contiene conceptos matemáticos/analíticos. ChatGPT resuelve problemas paso a paso, demostraciones y cálculos.";
+    iaRazon = "Contiene conceptos matematicos/analiticos. ChatGPT resuelve problemas paso a paso.";
   } else if (scores.prog / maxScore > 0.35) {
     ia = "kimi";
-    iaRazon = "Contiene temas de programación/sistemas. Kimi analiza código, genera implementaciones y revisa algoritmos.";
+    iaRazon = "Contiene temas de programacion/sistemas. Kimi analiza codigo y genera implementaciones.";
   } else if (scores.redaccion / maxScore > 0.25) {
     ia = "claude";
-    iaRazon = "Contiene temas de redacción/teoría. Claude redige ensayos, revisa estilo académico y estructura argumentativa.";
+    iaRazon = "Contiene temas de redaccion/teoria. Claude redige ensayos y revisa estilo academico.";
   } else {
     ia = "kimi";
     iaRazon = "Tema mixto. Kimi trabaja bien con documentos largos y planes de estudio generales.";
@@ -616,7 +959,7 @@ function analyzeText(fullText, subjectName) {
   return { resumen, topics, repasos, tests, ejercicios, resumenes, ia, iaRazon };
 }
 
-/* ---------------- Detección de temas mejorada ---------------- */
+/* Deteccion de temas */
 function detectTopics(lines, fullText) {
   const topics = [];
   const seen = new Set();
@@ -630,47 +973,38 @@ function detectTopics(lines, fullText) {
     topics.push(clean);
   };
 
-  /* Patrón 1: Numeración clara (1., 1.1, I., A), etc.) */
   const numPatterns = [
-    /^(\d{1,2})\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
+    /^(\d{1,2})\.\s+([A-ZAEIOU].{5,100})/,
     /^(\d{1,2}\.\d{1,2})\.\s+(.{5,100})/,
-    /^([IVX]+)\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
-    /^([A-Z])\.\s+([A-ZÁÉÍÓÚÜ].{5,100})/,
+    /^([IVX]+)\.\s+([A-ZAEIOU].{5,100})/,
+    /^([A-Z])\.\s+([A-ZAEIOU].{5,100})/,
   ];
 
-  /* Patrón 2: Palabras clave de estructura */
   const structPatterns = [
-    /^(tema|capítulo|unidad|módulo|sección|parte|clase|práctica|taller|laboratorio)\s+\d+[\.\:\-]?\s*(.+)/i,
-    /^(tema|capítulo|unidad|módulo|sección)\s*[\:\-]\s*(.+)/i,
+    /^(tema|capitulo|unidad|modulo|seccion|parte|clase|practica|taller|laboratorio)\s+\d+[\.\:\-]?\s*(.+)/i,
+    /^(tema|capitulo|unidad|modulo|seccion)\s*[\:\-]\s*(.+)/i,
   ];
 
-  /* Patrón 3: Líneas en mayúsculas o con formato de título */
-  const titlePattern = /^[A-ZÁÉÍÓÚÜ\s]{8,60}$/;
+  const titlePattern = /^[A-ZAEIOU\s]{8,60}$/;
 
   lines.forEach((line, idx) => {
-    /* Numeración */
     for (const pat of numPatterns) {
       const m = line.match(pat);
       if (m) { addTopic(m[2] || m[1]); break; }
     }
-
-    /* Estructura */
     for (const pat of structPatterns) {
       const m = line.match(pat);
       if (m) { addTopic(m[2] || m[0]); break; }
     }
-
-    /* Títulos en mayúsculas (solo si la línea anterior está vacía o es corta) */
     if (titlePattern.test(line) && topics.length < 20) {
       const prev = lines[idx - 1] || "";
       if (prev.length < 10) addTopic(line.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()));
     }
   });
 
-  /* Si no se encontraron suficientes temas, usar contenido semántico */
   if (topics.length < 4) {
     const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 25 && s.length < 180);
-    const kw = ["tema","capítulo","unidad","módulo","sección","parte","práctica","ejercicio","taller","laboratorio","concepto","definición","importante","fundamental","básico","avanzado"];
+    const kw = ["tema","capitulo","unidad","modulo","seccion","parte","practica","ejercicio","taller","laboratorio","concepto","definicion","importante","fundamental","basico","avanzado"];
     sentences.forEach(s => {
       if (topics.length >= 15) return;
       if (kw.some(k => s.toLowerCase().includes(k))) {
@@ -679,7 +1013,6 @@ function detectTopics(lines, fullText) {
     });
   }
 
-  /* Último recurso: oraciones representativas */
   if (topics.length < 4) {
     const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 150);
     const unique = [...new Set(sentences)];
@@ -689,25 +1022,16 @@ function detectTopics(lines, fullText) {
   return topics.slice(0, 20);
 }
 
-/* ---------------- Resumen inteligente ---------------- */
 function generateIntelligentSummary(fullText, subjectName, scores) {
-  const lines = fullText.split(/\n+/).map(l => l.trim()).filter(l => l.length > 15);
   const sentences = fullText.split(/[\.!\?]+/).map(s => s.trim()).filter(s => s.length > 20 && s.length < 250);
-
-  /* Palabras clave importantes */
   const importantWords = extractImportantWords(fullText);
 
-  /* Seleccionar oraciones más representativas */
   const scored = sentences.map(s => {
     let score = 0;
     const sl = s.toLowerCase();
-    /* Oraciones con palabras clave valen más */
     importantWords.forEach(w => { if (sl.includes(w)) score += 2; });
-    /* Oraciones con definiciones */
     if (sl.includes("es una") || sl.includes("es un") || sl.includes("se define") || sl.includes("consiste en")) score += 3;
-    /* Oraciones con importancia */
-    if (sl.includes("importante") || sl.includes("fundamental") || sl.includes("básico") || sl.includes("clave")) score += 2;
-    /* Oraciones más largas suelen tener más info */
+    if (sl.includes("importante") || sl.includes("fundamental") || sl.includes("basico") || sl.includes("clave")) score += 2;
     if (s.length > 60) score += 1;
     return { text: s, score };
   });
@@ -716,18 +1040,17 @@ function generateIntelligentSummary(fullText, subjectName, scores) {
   const top = scored.slice(0, 6).map(s => s.text);
 
   if (top.length === 0) {
-    return `${subjectName}: Asignatura del plan de estudios que requiere estudio detallado. Revisar definiciones, conceptos fundamentales y aplicaciones prácticas.`;
+    return `${subjectName}: Asignatura del plan de estudios que requiere estudio detallado.`;
   }
 
   let summary = `${subjectName}: ${top[0]}`;
   if (top.length > 1) summary += ` ${top[1]}`;
   if (top.length > 2) summary += ` ${top[2]}`;
 
-  /* Detectar tipo */
-  const typeLabel = scores.math > scores.prog && scores.math > scores.redaccion ? "matemática"
-    : scores.prog > scores.redaccion ? "de programación/sistemas"
-    : scores.redaccion > 0 ? "teórica/redacción" : "mixta";
-  summary += `\n\nTipo: ${typeLabel}. Se recomienda practicar con ejercicios y revisar definitiones clave.`;
+  const typeLabel = scores.math > scores.prog && scores.math > scores.redaccion ? "matematica"
+    : scores.prog > scores.redaccion ? "de programacion/sistemas"
+    : scores.redaccion > 0 ? "teorica/redaccion" : "mixta";
+  summary += `\n\nTipo: ${typeLabel}. Se recomienda practicar con ejercicios y revisar definiciones clave.`;
 
   return summary.substring(0, 600);
 }
@@ -738,13 +1061,12 @@ function extractImportantWords(text) {
   const freq = {};
   words.forEach(w => { freq[w] = (freq[w] || 0) + 1; });
   return Object.entries(freq)
-    .filter(([w, c]) => c >= 2 && !["para","como","más","pero","este","esta","todo","otro","otra","desde","hasta","cuando","donde","porque","según","todos","ellas","ellos","tiene","tiene","puede","sobre","otras","estos","estas","cada","ello","otro","ella","ellos","nos","les","dos","uno","una","las","los","que","como","más","pero","este","esta","todo","desde","hasta","cuando","donde","porque","según","hay","son","fue","ser","sin","con","una","por","para","sino","como","más","menos","muy","tan","sólo","solo","aquí","ahí","allí","así","luego","después","antes","aquello","ese","esa","eso","aquel","aquella","esto","ello"].includes(w))
+    .filter(([w, c]) => c >= 2 && !["para","como","mas","pero","este","esta","todo","otro","otra","desde","hasta","cuando","donde","porque","segun","todos","ellas","ellos","tiene","puede","sobre","otras","estos","estas","cada","ello","otro","ella","nos","les","dos","uno","una","las","los","que","sin","con","por","sino","muy","tan","solo","aqui","ahi","alli","asi","luego","despues","antes","ese","esa","eso","aquel","esto"].includes(w))
     .sort((a, b) => b[1] - a[1])
     .slice(0, 20)
     .map(([w]) => w);
 }
 
-/* ---------------- Resumen por tema (mejorado) ---------------- */
 function generateTopicSummary(topic, fullText) {
   const lower = fullText.toLowerCase();
   const topicLower = topic.toLowerCase().substring(0, 25);
@@ -755,10 +1077,9 @@ function generateTopicSummary(topic, fullText) {
   const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 20);
 
   if (sentences.length === 0) {
-    return `Tema "${topic}": Concepto del plan de estudios. Revisar definiciones, propiedades y aplicaciones prácticas. Relacionar con otros temas del programa.`;
+    return `Tema "${topic}": Concepto del plan de estudios. Revisar definiciones y aplicaciones practicas.`;
   }
 
-  /* Seleccionar oraciones más informativas */
   const scored = sentences.map(s => {
     let sc = 0;
     const sl = s.toLowerCase();
@@ -770,12 +1091,11 @@ function generateTopicSummary(topic, fullText) {
 
   const top = scored.slice(0, 4).map(s => s.text);
   let summary = `Resumen de ${topic}:\n\n`;
-  summary += top.map(p => `• ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
-  summary += `\n\nPuntos clave: domina definiciones, practica ejemplos, revisa relación con otros temas.`;
+  summary += top.map(p => `- ${p.charAt(0).toUpperCase() + p.slice(1)}.`).join("\n");
+  summary += `\n\nPuntos clave: domina definiciones, practica ejemplos, revisa relacion con otros temas.`;
   return summary.substring(0, 400);
 }
 
-/* ---------------- Repasos (mejorado) ---------------- */
 function generateReview(topic, fullText, scores) {
   const lower = fullText.toLowerCase();
   const topicLower = topic.toLowerCase().substring(0, 25);
@@ -784,28 +1104,25 @@ function generateReview(topic, fullText, scores) {
   if (idx !== -1) context = fullText.substring(Math.max(0, idx - 200), Math.min(fullText.length, idx + 900));
 
   const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 15);
-
-  /* Seleccionar puntos relevantes */
   const points = sentences.slice(0, 8).map(s => s.charAt(0).toUpperCase() + s.slice(1));
 
   if (points.length === 0) {
     points.push(
-      "Definición y conceptos fundamentales del tema.",
-      "Propiedades y características principales.",
-      "Aplicación práctica y ejemplos típicos.",
-      "Relación con otros temas del plan de estudios.",
-      "Preguntas frecuentes de exámenes anteriores."
+      "Definicion y conceptos fundamentales del tema.",
+      "Propiedades y caracteristicas principales.",
+      "Aplicacion practica y ejemplos tipicos.",
+      "Relacion con otros temas del plan de estudios.",
+      "Preguntas frecuentes de examenes anteriores."
     );
   }
 
-  /* Tips de estudio según el tipo */
   let studyTips = "";
   if (scores.math > scores.prog && scores.math > scores.redaccion) {
-    studyTips = "\n\nConsejos de estudio:\n- Resuelve al menos 5 ejercicios de cada tipo\n- Domina las demostraciones paso a paso\n- Revisa fórmulas y teoremas fundamentales\n- Practica con problemas de parciales anteriores";
+    studyTips = "\n\nConsejos de estudio:\n- Resuelve al menos 5 ejercicios de cada tipo\n- Domina las demostraciones paso a paso\n- Revisa formulas y teoremas fundamentales";
   } else if (scores.prog > scores.redaccion) {
-    studyTips = "\n\nConsejos de estudio:\n- Implementa cada algoritmo en código\n- Dibuja diagramas de flujo y estructuras de datos\n- Analiza la complejidad temporal y espacial\n- Practica con problemas de programación competitiva";
+    studyTips = "\n\nConsejos de estudio:\n- Implementa cada algoritmo en codigo\n- Dibuja diagramas de flujo y estructuras de datos\n- Analiza la complejidad temporal y espacial";
   } else {
-    studyTips = "\n\nConsejos de estudio:\n- Elabora mapas conceptuales del tema\n- Redacta ensayos cortos sobre los conceptos clave\n- Analiza las relaciones causa-efecto\n- Prepara argumentos para debate";
+    studyTips = "\n\nConsejos de estudio:\n- Elabora mapas conceptuales del tema\n- Redacta ensayos cortos sobre los conceptos clave\n- Analiza las relaciones causa-efecto";
   }
 
   let review = `Repaso: ${topic}\n\n`;
@@ -814,7 +1131,6 @@ function generateReview(topic, fullText, scores) {
   return review;
 }
 
-/* ---------------- Generación de preguntas (corregido) ---------------- */
 function generateQuestions(topic, fullText, scores) {
   const lower = fullText.toLowerCase();
   const topicLower = topic.toLowerCase().substring(0, 25);
@@ -824,37 +1140,33 @@ function generateQuestions(topic, fullText, scores) {
 
   const sentences = context.split(/[\.!\n]+/).map(s => s.trim()).filter(s => s.length > 20);
   const questions = [];
-
-  /* Generar 3-5 preguntas */
   const numQ = Math.min(5, Math.max(3, Math.min(sentences.length, 5)));
 
   for (let i = 0; i < numQ; i++) {
     const base = sentences[i % sentences.length] || topic;
     const words = base.split(/\s+/).filter(w => w.length > 4);
-
     let correct, wrong1, wrong2, wrong3, pregunta;
 
     if (scores.math > scores.prog && scores.math > scores.redaccion) {
       correct = base.substring(0, 130);
       wrong1 = words.slice(0, 4).join(" ") + " " + words.slice(-2).join(" ");
-      wrong2 = `La definición de ${topic} en un contexto no relacionado`;
+      wrong2 = `La definicion de ${topic} en un contexto no relacionado`;
       wrong3 = words.slice(2, 6).join(" ");
-      pregunta = `¿Cuál de las siguientes afirmaciones sobre "${topic}" es correcta?`;
+      pregunta = `¿Cual de las siguientes afirmaciones sobre "${topic}" es correcta?`;
     } else if (scores.prog > scores.redaccion) {
       correct = `En ${topic}: ${base.substring(0, 120)}`;
       wrong1 = `${topic} solo se aplica en bases de datos relacionales`;
-      wrong2 = `No existe implementación práctica de ${topic}`;
-      wrong3 = `${topic} es exclusivo de un solo lenguaje de programación`;
-      pregunta = `Sobre "${topic}", ¿cuál afirmación es correcta?`;
+      wrong2 = `No existe implementacion practica de ${topic}`;
+      wrong3 = `${topic} es exclusivo de un solo lenguaje de programacion`;
+      pregunta = `Sobre "${topic}", ¿cual afirmacion es correcta?`;
     } else {
       correct = base.substring(0, 130);
-      wrong1 = `${topic} no tiene relación con el contenido principal de la asignatura`;
+      wrong1 = `${topic} no tiene relacion con el contenido principal`;
       wrong2 = `El concepto es opuesto a lo descrito en el plan`;
-      wrong3 = `${topic} solo aplica en contextos no académicos`;
-      pregunta = `¿Qué describe correctamente "${topic}"?`;
+      wrong3 = `${topic} solo aplica en contextos no academicos`;
+      pregunta = `¿Que describe correctamente "${topic}"?`;
     }
 
-    /* Crear opciones y aleatorizar correctamente */
     const opciones = shuffle([correct, wrong1, wrong2, wrong3]);
     const respuesta = opciones.indexOf(correct);
 
@@ -868,7 +1180,6 @@ function generateQuestions(topic, fullText, scores) {
   return questions;
 }
 
-/* ---------------- Ejercicios ---------------- */
 function generateExercise(topic, fullText, scores) {
   const lower = fullText.toLowerCase();
   const topicLower = topic.toLowerCase().substring(0, 25);
@@ -881,115 +1192,19 @@ function generateExercise(topic, fullText, scores) {
 
   if (scores.math > scores.prog && scores.redaccion) {
     return {
-      enunciado: `Resuelva o demuestre un problema relacionado con "${topic}". Base teórica: ${ref}.`,
-      solucion: `Paso 1: Identificar los datos y condiciones del problema.\nPaso 2: Aplicar la definición o teorema de ${topic}.\nPaso 3: Desarrollar la solución paso a paso con justificación.\nPaso 4: Verificar el resultado y escribir la conclusión.`,
+      enunciado: `Resuelva o demuestre un problema relacionado con "${topic}". Base teorica: ${ref}.`,
+      solucion: `Paso 1: Identificar datos y condiciones.\nPaso 2: Aplicar definicion o teorema.\nPaso 3: Desarrollar solucion paso a paso.\nPaso 4: Verificar resultado.`,
     };
   } else if (scores.prog > scores.redaccion) {
     return {
-      enunciado: `Implemente un módulo o función que aplique "${topic}". Considere: ${ref}.`,
-      solucion: `Paso 1: Definir la estructura de datos requerida.\nPaso 2: Implementar la lógica de ${topic} con pseudocódigo o lenguaje real.\nPaso 3: Probar con al menos 3 casos de prueba.\nPaso 4: Analizar complejidad temporal y documentar.`,
+      enunciado: `Implemente un modulo o funcion que aplique "${topic}". Considere: ${ref}.`,
+      solucion: `Paso 1: Definir estructura de datos.\nPaso 2: Implementar logica con pseudocodigo.\nPaso 3: Probar con 3 casos de prueba.\nPaso 4: Analizar complejidad y documentar.`,
     };
   } else {
     return {
-      enunciado: `Desarrolle un análisis o ensayo sobre "${topic}". Fundamente con: ${ref}.`,
-      solucion: `Paso 1: Investigar al menos 3 fuentes sobre ${topic}.\nPaso 2: Estructurar la introducción con tesis clara.\nPaso 3: Desarrollar argumentos con evidencias y ejemplos.\nPaso 4: Redactar la conclusión vinculando con la tesis.`,
+      enunciado: `Desarrolle un analisis o ensayo sobre "${topic}". Fundamente con: ${ref}.`,
+      solucion: `Paso 1: Investigar al menos 3 fuentes.\nPaso 2: Estructurar introduccion con tesis.\nPaso 3: Desarrollar argumentos con evidencias.\nPaso 4: Redactar conclusion.`,
     };
-  }
-}
-
-/* =========================================================
-   EJECUCIÓN DEL ANÁLISIS
-   ========================================================= */
-async function runAnalysis() {
-  const name = byId("analyzer-name").value.trim();
-  if (!name) { toast("Escribe el nombre de la asignatura", "error"); return; }
-  if (!analyzerFiles.length) { toast("Selecciona al menos un PDF", "error"); return; }
-
-  const btn = byId("btn-analyze");
-  btn.disabled = true;
-  const originalBtnHtml = btn.innerHTML;
-  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Analizando...`;
-
-  try {
-    /* Paso 1: Extraer texto de los PDFs */
-    let fullText = "";
-    for (let i = 0; i < analyzerFiles.length; i++) {
-      setProgress(((i + 1) / analyzerFiles.length) * 55, `Leyendo PDF ${i + 1}/${analyzerFiles.length}: ${analyzerFiles[i].name}`);
-      try {
-        const text = await extractPdfText(analyzerFiles[i]);
-        fullText += text + "\n\n";
-      } catch (pdfErr) {
-        console.error(`Error leyendo ${analyzerFiles[i].name}:`, pdfErr);
-        toast(`Error leyendo "${analyzerFiles[i].name}": ${pdfErr.message}`, "error");
-      }
-    }
-
-    if (!fullText.trim()) {
-      toast("No se pudo extraer texto de los PDFs. Pueden ser imágenes escaneadas.", "error");
-      return;
-    }
-
-    setProgress(60, "Analizando contenido...");
-    await new Promise(r => setTimeout(r, 200));
-
-    /* Paso 2: Analizar texto */
-    let result;
-    try {
-      result = analyzeText(fullText, name);
-    } catch (analyzeErr) {
-      console.error("Error en análisis:", analyzeErr);
-      toast("Error al analizar el contenido: " + analyzeErr.message, "error");
-      return;
-    }
-
-    setProgress(80, "Generando tests y ejercicios...");
-    await new Promise(r => setTimeout(r, 200));
-
-    /* Paso 3: Guardar asignatura */
-    let subject = userSubjects.find(s => s.nombre.toLowerCase() === name.toLowerCase());
-    if (!subject) {
-      subject = { id: "u_" + Date.now(), nombre: name, descripcion: `Análisis de ${analyzerFiles.length} PDF(s)`, anno: "2", semestre: "" };
-      userSubjects.push(subject);
-    }
-
-    Object.assign(subject, {
-      resumen: result.resumen,
-      temas: result.topics,
-      repasos: result.repasos,
-      tests: result.tests,
-      ejercicios: result.ejercicios,
-      resumenes: result.resumenes,
-      ia: result.ia,
-      iaRazon: result.iaRazon,
-      pendienteAnalisis: false,
-    });
-
-    setProgress(92, "Guardando...");
-    await new Promise(r => setTimeout(r, 150));
-
-    saveLocal();
-    renderAll();
-
-    setProgress(100, "Completado.");
-    analyzerFiles = [];
-    renderAnalyzerFileList();
-    byId("analyzer-name").value = "";
-
-    const nTopics = result.topics.length;
-    const nTests = result.tests.length;
-    const nExercises = result.ejercicios.length;
-    toast(`"${name}": ${nTopics} temas, ${nTests} tests, ${nExercises} ejercicios — IA: ${iaLabel(result.ia)}`);
-    setTimeout(() => { byId("analyzer-progress").hidden = true; }, 1500);
-
-    /* Abrir detalle de la asignatura */
-    openDetail(subject.id);
-  } catch (err) {
-    toast("Error inesperado: " + err.message, "error");
-    console.error(err);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = originalBtnHtml;
-    btn.disabled = !analyzerFiles.length || !byId("analyzer-name").value.trim();
   }
 }
 
@@ -1042,15 +1257,25 @@ function bindEvents() {
     const data = { nombre: byId("f-nombre").value.trim(), descripcion: byId("f-descripcion").value.trim(), anno: "2", semestre: "" };
     if (editingId) {
       Object.assign(userSubjects.find(x => x.id === editingId), data);
+      /* Actualizar en backend tambien */
+      if (backendAvailable) {
+        apiFetch(`/subjects/${editingId}`, { method: "PUT", body: JSON.stringify({ name: data.nombre, description: data.descripcion }) }).catch(e => console.warn("Error actualizando backend:", e));
+      }
       toast("Cambios guardados");
     } else {
       const newId = "u_" + Date.now();
-      userSubjects.push({ id: newId, ...data, resumen: "", temas: [], repasos: [], tests: [], ejercicios: [], resumenes: [], ia: null, iaRazon: "" });
+      const newSubject = { id: newId, ...data, resumen: "", temas: [], repasos: [], tests: [], ejercicios: [], resumenes: [], ia: null, iaRazon: "" };
+      userSubjects.push(newSubject);
+      /* Crear en backend */
+      if (backendAvailable) {
+        apiFetch("/subjects", { method: "POST", body: JSON.stringify({ name: data.nombre, description: data.descripcion }) })
+          .then(s => { newSubject.id = s.id; })
+          .catch(e => console.warn("Error creando en backend:", e));
+      }
       toast("Asignatura guardada");
     }
     saveLocal(); renderAll(); closeModals();
   });
-
 }
 
 function switchView(v) {
